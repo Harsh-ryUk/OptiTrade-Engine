@@ -10,7 +10,7 @@ namespace {
 optitrade::EngineConfig make_config(
     const optitrade::Quantity max_order_quantity = 100) noexcept {
     optitrade::EngineConfig config{};
-    config.instrument_id = 77;
+    config.symbol_id = 0;
     config.strategy.imbalance_threshold_bps = 6000;
     config.strategy.order_quantity = 10;
     config.risk.max_order_quantity = max_order_quantity;
@@ -26,12 +26,12 @@ optitrade::wire::MarketDataMessage make_message(
     const std::uint16_t level,
     const std::int64_t price_ticks,
     const std::uint32_t quantity,
-    const std::uint32_t instrument_id = 77) noexcept {
+    const std::uint32_t symbol_id = 77) noexcept {
     optitrade::wire::MarketDataMessage message{};
     message.sequence_number = sequence_number;
     message.exchange_timestamp_ns =
         static_cast<std::uint64_t>(sequence_number) * 1000ULL;
-    message.instrument_id = instrument_id;
+    message.symbol_id = sequence_number % 4;
     message.price_ticks = price_ticks;
     message.quantity = quantity;
     message.side = side;

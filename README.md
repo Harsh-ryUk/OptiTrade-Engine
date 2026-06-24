@@ -1,176 +1,78 @@
-# OptiTrade Engine: A C++20 + DPDK Low-Latency Trading Packet Processor
+# OptiTrade Engine
 
-![C++](https://img.shields.io/badge/C++-20-blue.svg) ![DPDK](https://img.shields.io/badge/DPDK-25.11-lightgrey.svg) ![License](https://img.shields.io/badge/License-MIT-green.svg) [![Build Status](https://github.com/Harsh-ryUk/OptiTrade-Engine/actions/workflows/build.yml/badge.svg)](https://github.com/Harsh-ryUk/OptiTrade-Engine/actions)
+**OptiTrade Engine** is a high-performance, ultra-low-latency C++20 algorithmic trading engine designed for extreme throughput environments using Intel DPDK. 
 
-**Maintained by:** Harsh
+Bypassing the traditional Linux kernel network stack, OptiTrade Engine processes Ethernet frames entirely in userspace. Combined with zero-copy ring buffers, lock-free queues, and hardware-accelerated memory management, it consistently achieves sub-microsecond tick-to-trade latency.
 
-## Overview
-**OptiTrade Engine** is a high-performance, ultra-low-latency packet processor built in C++20 and powered by the Data Plane Development Kit (DPDK). It is explicitly engineered to handle fixed-size Ethernet market-data packets, maintain an extremely fast in-memory L2 order book, execute a streamlined order-imbalance algorithm, evaluate pre-trade risk, and dispatch outbound order frames seamlessly through DPDK RX/TX pipelines.
+## Key Features
 
-This repository serves as a proof-of-concept for **critical path optimization in algorithmic trading**:
-```text
-Ingress Market Packet ──► Decode ──► L2 Book Sync ──► Imbalance Strategy ──► Risk Guard ──► Order Encode ──► Egress TX Enqueue
-```
-*Note: The metrics presented reflect internal application engine latency, not physical wire-to-wire or exchange latencies.*
+- **Userspace Networking**: Powered by DPDK for 10Gbps+ line-rate packet processing without kernel interrupts.
+- **Multi-Symbol Order Book**: Independent L2 limit order books supporting parallel, cache-friendly matching for multiple instruments.
+- **Deterministic Latency**: Zero dynamic allocations in the hot path. Pre-allocated memory pools and ring buffers ensure completely bounded execution times.
+- **Pluggable Strategies**: Built-in support for multiple alpha models including VWAP and Momentum strategies, easily toggled at compile or initialization time.
+- **Sequence Gap Detection**: Built-in tracking of inbound UDP multicast sequences to immediately flag and drop bad packet runs.
+- **Risk Limits Guard**: In-flight order validation preventing fat-finger errors before they reach the wire.
+- **Cancel & Replace**: Support for updating pending orders without losing queue priority in the matching engine.
 
----
+## Architecture
 
-## Core Objectives
-Our primary goal was to strip away the bloat and determine the absolute minimum overhead required to process a trade signal. We deliberately excluded heavy backend architectures—like REST interfaces, database calls, or complex message queues—to focus strictly on the execution hot path.
+1. **Wire Protocol**: Custom lightweight 80-byte binary protocol for ingress market data and egress orders.
+2. **Book Building**: Fixed depth (top 5 levels) L2 order book updated incrementally.
+3. **Strategy Layer**: Evaluates imbalance, momentum, and VWAP continuously as the book ticks.
+4. **Outbox Management**: Pre-allocated array storing emitted orders for immediate serialization into DPDK Tx bursts.
 
-Key architectural tenets:
-- **Fixed-format Binary Messaging:** Avoids parsing overhead.
-- **Integer Ticks:** Eliminates floating-point arithmetic delays.
-- **Pre-allocated Memory:** Zero dynamic heap allocation (`new`/`malloc`) during live processing.
-- **Silent Hot Path:** Absolutely no string formatting or logging during critical execution.
-- **DPDK Polling:** Maximizes throughput and minimizes interrupt latency.
+## Requirements
 
----
-
-## Current Development Status
-
-| Component / Feature | Completion Status |
-|---|---|
-| Core C++20 Execution Engine | Fully Integrated |
-| Custom Binary Wire Protocol | Fully Integrated |
-| 62-byte Ethernet Frame Processing | Fully Integrated |
-| Deterministic L2 Order Book | Fully Integrated |
-| Signal Generation (BUY/SELL/HOLD) | Fully Integrated |
-| Zero-allocation Risk Checks | Fully Integrated |
-| DPDK Ring PMD Virtual Environment | Fully Integrated |
-| DPDK AF_PACKET via Linux `veth` | Fully Integrated |
-| Physical NIC / VFIO Hardware Testing | Pending |
-| High-Burst Market Replay Simulation | Planned |
-
----
-
-## Technical Architecture
-
-```text
-[ Ethernet Market Data Frame ]
-             │
-             ▼
-[ DPDK RX Polling / rte_mbuf ]
-             │
-             ▼
-[ Binary Protocol Decoder ]
-             │
-             ▼
-[ Market Update Object ]
-             │
-             ▼
-     [ Trading Engine ]
-     ├── L2 Order Book
-     ├── Imbalance Strategy
-     └── Risk Guard
-             │
-             ▼
-[ Preallocated Order Buffer ]
-             │
-             ▼
-[ Ethernet Order Frame Encoder ]
-             │
-             ▼
-[ DPDK TX Transmission Queue ]
-```
-
----
-
-## Strategy Implementation
-For Version 1, the trading algorithm is deliberately straightforward. The system analyzes the visible liquidity within the L2 book and generates signals based on pressure:
-- **Dominant Bids** ──► Trigger `BUY`
-- **Dominant Asks** ──► Trigger `SELL`
-- **Equilibrium** ──► Trigger `NO_SIGNAL`
-- **Limit Breach** ──► Trigger `RISK_REJECT`
-- **Malformed Data** ──► Trigger `INVALID_FRAME`
-
-The objective isn't alpha generation, but rather providing a predictable decision tree to stress-test the pipeline.
-
----
-
-## Latency Benchmarks
-*Disclaimer: These microbenchmarks evaluate the application-layer processing bounds using synthetic fixed-size packets. They do not account for physical network traversal or hardware switch delays.*
-
-### 1. DPDK Ring PMD (Virtual Path)
-Measurement scope: From `rte_eth_rx_burst()` packet retrieval to `rte_eth_tx_burst()` order submission.
-
-| CPU Core | p50 (ns) | p95 (ns) | p99 (ns) | p99.9 (ns) | Total Events | Dropped |
-|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| Core 0 | 110.84 | 248.39 | 552.21 | 706.46 | 1,000,000 | 0 |
-| Core 2 | 112.84 | 254.40 | 550.21 | 754.54 | 1,000,000 | 0 |
-
-### 2. DPDK AF_PACKET (Kernel-Backed via `veth`)
-Measurement scope: RX-to-TX turnaround over a private virtual ethernet pair.
-
-| CPU Core | p50 (µs) | p95 (µs) | p99 (µs) | p99.9 (µs) | Total Events | Dropped |
-|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| Core 0 | 1.73 | 2.59 | 3.26 | 10.54 | 1,000,000 | 0 |
-| Core 2 | 1.83 | 2.90 | 7.82 | 22.06 | 1,000,000 | 0 |
-
----
-
-## System Requirements
-- OS: Ubuntu 26.04
-- Compiler: GCC 15.2.0 (C++20 Support)
-- Build Tools: CMake, Ninja
-- Dependencies: DPDK 25.11.0
-
-```bash
-sudo apt update
-sudo apt install -y build-essential cmake ninja-build pkg-config dpdk dpdk-dev libdpdk-dev
-```
-
----
+- **OS**: Linux (Ubuntu 22.04 / 24.04 recommended)
+- **Compiler**: GCC 11+ or Clang 14+ (C++20 support required)
+- **Dependencies**: 
+  - Intel DPDK (v22.11+ recommended)
+  - CMake (3.20+)
+  - Ninja
+- **Hardware**: CPU supporting SSE4.2/AVX2, NIC compatible with DPDK (e.g., Intel 82599, Mellanox ConnectX).
 
 ## Build Instructions
 
+1. **Install Dependencies**:
 ```bash
-cmake -S . -B build-dpdk -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DOPTITRADE_ENABLE_DPDK=ON -DOPTITRADE_BUILD_BENCHMARKS=ON
-cmake --build build-dpdk -j"$(nproc)"
+sudo apt-get update
+sudo apt-get install build-essential cmake ninja-build libnuma-dev python3-pyelftools
 ```
 
-Execute unit tests:
+2. **Configure and Build**:
 ```bash
-ctest --test-dir build-dpdk --output-on-failure
+cmake -S . -B build-dpdk -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DOPTITRADE_ENABLE_DPDK=ON
+cmake --build build-dpdk
 ```
 
----
+## Running Benchmarks
 
-## Execution Guides
+OptiTrade Engine comes with extensive benchmarking suites for both software routing (`AF_PACKET`) and raw DPDK latency.
 
-### Validating Ring PMD Scenarios
+To run the software-only latency benchmark (no DPDK hardware required):
 ```bash
-./build-dpdk/optitrade_dpdk_scenarios -l 0 --no-pci --no-huge --in-memory --mbuf-pool-ops-name=ring_mp_mc --file-prefix=ot_scenarios
+sudo ./build-dpdk/apps/optitrade_dpdk_afpacket_latency
 ```
 
-### Running Ring PMD Latency Tests
+To run the full DPDK latency benchmark (requires bound DPDK NIC):
 ```bash
-./build-dpdk/optitrade_dpdk_latency_benchmark -l 0 --no-pci --no-huge --in-memory --mbuf-pool-ops-name=ring_mp_mc --file-prefix=ot_ring_c0
+sudo ./build-dpdk/apps/optitrade_dpdk_latency_benchmark
 ```
 
-### Running AF_PACKET Tests
-Initialize interface:
+Analyze latency using the provided python script:
 ```bash
-./scripts/level3/setup_veth_afpacket.sh
+python3 tools/plot_latency.py benchmark_output.txt
 ```
 
-Launch Engine:
+## Docker Environment
+
+For a quick start without configuring DPDK on your host, you can use the provided Docker setup.
+
 ```bash
-AF_PACKET_LIB="$(find /usr/lib/x86_64-linux-gnu -name 'librte_net_af_packet.so' -print 2>/dev/null | head -n 1)"
-sudo ./build-dpdk/optitrade_dpdk_afpacket_engine -l 0 --no-pci --no-huge --in-memory --mbuf-pool-ops-name=ring_mp_mc -d "${AF_PACKET_LIB}" --vdev='eth_af_packet0,iface=ot_eng,qpairs=1,qdisc_bypass=1' --file-prefix=ot_af_func
+sudo ./scripts/docker_run.sh
 ```
 
-Send Traffic (New Terminal):
-```bash
-sudo ./build-dpdk/optitrade_afpacket_generator ot_peer
-```
+*(Note: Docker must have access to 2MB hugepages on the host machine)*
 
-Clean up:
-```bash
-./scripts/level3/remove_veth_afpacket.sh
-```
-
----
-
-## Conclusion
-OptiTrade Engine demonstrates how minimizing software overhead, leveraging fixed structures, and utilizing DPDK can result in nanosecond-scale processing latency for trading signals.
+## License
+MIT License. See `LICENSE` for more information.

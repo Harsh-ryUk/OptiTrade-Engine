@@ -12,7 +12,7 @@ int main() {
     MarketDataMessage market{};
     market.sequence_number = 1;
     market.exchange_timestamp_ns = 10;
-    market.instrument_id = 7;
+    market.symbol_id = 7;
     market.price_ticks = 100;
     market.quantity = 20;
     market.side = Side::buy;

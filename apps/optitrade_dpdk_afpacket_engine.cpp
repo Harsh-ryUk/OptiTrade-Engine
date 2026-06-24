@@ -53,7 +53,7 @@ void print_port_error(const char* operation,
 optitrade::EngineConfig make_engine_config() noexcept {
     optitrade::EngineConfig config{};
 
-    config.instrument_id = 77;
+    config.symbol_id = 0; // Unused in multi-symbol mode
     config.strategy.imbalance_threshold_bps = 6000;
     config.strategy.order_quantity = 10;
 

@@ -111,6 +111,14 @@ public:
         return result;
     }
 
+    [[nodiscard]] const std::array<BookLevel, kVisibleDepth>& bids() const noexcept {
+        return bids_;
+    }
+
+    [[nodiscard]] const std::array<BookLevel, kVisibleDepth>& asks() const noexcept {
+        return asks_;
+    }
+
 private:
     std::array<BookLevel, kVisibleDepth> bids_{};
     std::array<BookLevel, kVisibleDepth> asks_{};

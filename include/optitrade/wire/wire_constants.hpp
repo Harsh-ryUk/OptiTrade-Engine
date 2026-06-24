@@ -11,7 +11,7 @@ inline constexpr std::uint16_t kMagic = 0x5042;
 inline constexpr std::uint8_t kVersion = 1;
 
 inline constexpr std::size_t kWireHeaderBytes = 16;
-inline constexpr std::size_t kPayloadBytes = 32;
+inline constexpr std::size_t kPayloadBytes = 50;
 inline constexpr std::size_t kWireMessageBytes = kWireHeaderBytes + kPayloadBytes;
 inline constexpr std::size_t kEthernetHeaderBytes = 14;
 inline constexpr std::size_t kEthernetFrameBytesWithoutFcs =

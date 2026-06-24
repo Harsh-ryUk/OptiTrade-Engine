@@ -30,7 +30,7 @@ int main() {
     input_order.sequence_number = 202;
     input_order.wire_flags = 0x200U;
     input_order.client_order_id = 900001ULL;
-    input_order.instrument_id = 7;
+    input_order.symbol_id = 7;
     input_order.price_ticks = 100260;
     input_order.quantity = 25;
     input_order.side = Side::sell;
@@ -58,7 +58,7 @@ int main() {
     assert(output_order.sequence_number == input_order.sequence_number);
     assert(output_order.wire_flags == input_order.wire_flags);
     assert(output_order.client_order_id == input_order.client_order_id);
-    assert(output_order.instrument_id == input_order.instrument_id);
+    assert(output_order.symbol_id == input_order.symbol_id);
     assert(output_order.price_ticks == input_order.price_ticks);
     assert(output_order.quantity == input_order.quantity);
     assert(output_order.side == input_order.side);
@@ -66,11 +66,12 @@ int main() {
     assert(output_order.time_in_force == input_order.time_in_force);
     assert(output_order.order_flags == input_order.order_flags);
     assert(output_order.reserved == input_order.reserved);
+    assert(output_order.sequence_num == input_order.sequence_num);
 
     MarketDataMessage market_message{};
     market_message.sequence_number = 303;
     market_message.exchange_timestamp_ns = 1234;
-    market_message.instrument_id = 7;
+    market_message.symbol_id = 7;
     market_message.price_ticks = 100250;
     market_message.quantity = 10;
     market_message.side = Side::buy;

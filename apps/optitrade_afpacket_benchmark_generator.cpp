@@ -59,7 +59,7 @@ optitrade::wire::MarketDataMessage make_message(
     message.sequence_number = sequence_number;
     message.exchange_timestamp_ns =
         static_cast<std::uint64_t>(sequence_number) * 1000ULL;
-    message.instrument_id = 77;
+    message.symbol_id = sequence_number % 4;
     message.price_ticks = price_ticks;
     message.quantity = quantity;
     message.side = side;
@@ -147,8 +147,9 @@ bool receive_valid_order(
 }
 
 bool validate_buy_order(
-    const optitrade::wire::OutboundOrderMessage& order) noexcept {
-    return order.instrument_id == 77 &&
+    const optitrade::wire::OutboundOrderMessage& order,
+    const std::uint32_t sequence_number) noexcept {
+    return order.symbol_id == sequence_number % 4 &&
            order.price_ticks == 100100 &&
            order.quantity == 10 &&
            order.side == optitrade::wire::Side::buy;
@@ -177,7 +178,7 @@ bool send_trigger_and_validate_order(
     optitrade::wire::OutboundOrderMessage order{};
 
     return receive_valid_order(socket_fd, order) &&
-           validate_buy_order(order);
+           validate_buy_order(order, sequence_number);
 }
 
 }  // namespace

@@ -45,13 +45,14 @@ public:
 
         output.sequence_number = input.sequence_number;
         output.exchange_timestamp_ns = input.exchange_timestamp_ns;
-        output.instrument_id = input.instrument_id;
+        output.symbol_id = input.symbol_id;
         output.price_ticks = input.price_ticks;
         output.quantity = input.quantity;
         output.side = side;
         output.action = action;
         output.level = input.level;
         output.source_flags = input.source_flags;
+        output.sequence_num = input.sequence_num;
 
         return true;
     }
@@ -80,7 +81,7 @@ public:
         output.sequence_number = output_sequence_number;
         output.wire_flags = 0;
         output.client_order_id = input.client_order_id;
-        output.instrument_id = input.instrument_id;
+        output.symbol_id = input.symbol_id;
         output.price_ticks = input.price_ticks;
         output.quantity = input.quantity;
         output.side = side;

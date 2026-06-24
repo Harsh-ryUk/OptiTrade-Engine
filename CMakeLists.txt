@@ -249,3 +249,6 @@ if(OPTITRADE_ENABLE_DPDK)
         )
     endif()
 endif()
+
+add_executable(optitrade_hello apps/optitrade_hello.cpp)
+target_link_libraries(optitrade_hello PRIVATE optitrade_headers)

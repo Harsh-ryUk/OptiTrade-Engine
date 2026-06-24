@@ -307,7 +307,7 @@ MarketDataMessage make_market_data_message() noexcept {
     message.sequence_number = 1001;
     message.wire_flags = 0;
     message.exchange_timestamp_ns = 1234567890123ULL;
-    message.instrument_id = 77;
+    message.symbol_id = sequence_number % 4;
     message.price_ticks = 100250;
     message.quantity = 600;
     message.side = Side::buy;
@@ -325,7 +325,7 @@ OutboundOrderMessage make_test_order_from_market_data(
     order.sequence_number = market_data.sequence_number + 1;
     order.wire_flags = 0;
     order.client_order_id = 9000001ULL;
-    order.instrument_id = market_data.instrument_id;
+    order.symbol_id = market_data.symbol_id;
     order.price_ticks = market_data.price_ticks;
     order.quantity = 10;
     order.side = Side::buy;
@@ -551,10 +551,10 @@ int main(int argc, char** argv) {
 
     const bool packet_data_correct =
         decoded_market_message.sequence_number == market_message.sequence_number &&
-        decoded_market_message.instrument_id == market_message.instrument_id &&
+        decoded_market_message.symbol_id == market_message.symbol_id &&
         decoded_market_message.price_ticks == market_message.price_ticks &&
         decoded_market_message.quantity == market_message.quantity &&
-        decoded_order.instrument_id == market_message.instrument_id &&
+        decoded_order.symbol_id == market_message.symbol_id &&
         decoded_order.price_ticks == market_message.price_ticks &&
         decoded_order.quantity == 10 &&
         decoded_order.side == Side::buy;
@@ -578,7 +578,7 @@ int main(int argc, char** argv) {
     std::printf("Market sequence received: %u\n",
                 decoded_market_message.sequence_number);
     std::printf("Instrument ID received:   %u\n",
-                decoded_market_message.instrument_id);
+                decoded_market_message.symbol_id);
     std::printf("Market price ticks:        %lld\n",
                 static_cast<long long>(decoded_market_message.price_ticks));
     std::printf("Order client ID:           %llu\n",

@@ -25,5 +25,8 @@ jobs:
     - name: Build
       run: cmake --build build-dpdk -j$(nproc)
 
+    - name: Run optitrade_hello
+      run: ./build-dpdk/optitrade_hello
+
     - name: Run Tests
       run: ctest --test-dir build-dpdk --output-on-failure

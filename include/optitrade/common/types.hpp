@@ -29,13 +29,14 @@ enum class Signal : std::uint8_t {
 struct MarketUpdate {
     SequenceNumber sequence_number{};
     std::uint64_t exchange_timestamp_ns{};
-    InstrumentId instrument_id{};
+    InstrumentId symbol_id{};
     PriceTicks price_ticks{};
     Quantity quantity{};
     Side side{Side::buy};
     UpdateAction action{UpdateAction::modify};
     std::uint16_t level{};
     std::uint32_t source_flags{};
+    SequenceNumber sequence_num{};
 };
 
 constexpr bool is_valid_side(const Side side) noexcept {

@@ -31,7 +31,7 @@ struct ScenarioCounters {
 optitrade::EngineConfig make_config(
     const optitrade::Quantity max_order_quantity = 100) noexcept {
     optitrade::EngineConfig config{};
-    config.instrument_id = 77;
+    config.symbol_id = 0; // Unused in multi-symbol mode
     config.strategy.imbalance_threshold_bps = 6000;
     config.strategy.order_quantity = 10;
     config.risk.max_order_quantity = max_order_quantity;
@@ -99,7 +99,7 @@ optitrade::wire::MarketDataMessage make_message(
     message.sequence_number = sequence_number;
     message.exchange_timestamp_ns =
         static_cast<std::uint64_t>(sequence_number) * 1000ULL;
-    message.instrument_id = 77;
+    message.symbol_id = sequence_number % 4;
     message.price_ticks = price_ticks;
     message.quantity = quantity;
     message.side = side;
@@ -240,7 +240,7 @@ public:
         if (decoded_order.side != expected_side ||
             decoded_order.price_ticks != expected_price_ticks ||
             decoded_order.quantity != 10 ||
-            decoded_order.instrument_id != 77) {
+            decoded_order.symbol_id != 77) {
             return false;
         }
 

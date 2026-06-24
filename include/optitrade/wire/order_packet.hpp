@@ -12,7 +12,7 @@ struct OutboundOrderMessage {
     std::uint32_t sequence_number{};
     std::uint32_t wire_flags{};
     std::uint64_t client_order_id{};
-    std::uint32_t instrument_id{};
+    std::uint32_t symbol_id{};
     std::int64_t price_ticks{};
     std::uint32_t quantity{};
     Side side{Side::buy};
@@ -20,6 +20,7 @@ struct OutboundOrderMessage {
     TimeInForce time_in_force{TimeInForce::immediate_or_cancel};
     std::uint8_t order_flags{};
     std::uint32_t reserved{};
+    std::uint32_t sequence_num{};
 };
 
 inline bool encode_order(const OutboundOrderMessage& order,
@@ -42,7 +43,7 @@ inline bool encode_order(const OutboundOrderMessage& order,
     constexpr std::size_t base = kWireHeaderBytes;
 
     store_be64(out, base + 0, order.client_order_id);
-    store_be32(out, base + 8, order.instrument_id);
+    store_be32(out, base + 8, order.symbol_id);
     store_i64_be(out, base + 12, order.price_ticks);
     store_be32(out, base + 20, order.quantity);
     out[base + 24] = static_cast<std::byte>(order.side);
@@ -50,6 +51,7 @@ inline bool encode_order(const OutboundOrderMessage& order,
     out[base + 26] = static_cast<std::byte>(order.time_in_force);
     out[base + 27] = static_cast<std::byte>(order.order_flags);
     store_be32(out, base + 28, order.reserved);
+    store_be32(out, base + 32, order.sequence_num);
 
     return true;
 }
@@ -90,7 +92,7 @@ inline DecodeError decode_order(const std::span<const std::byte> input,
     output.sequence_number = header.sequence_number;
     output.wire_flags = header.flags;
     output.client_order_id = load_be64(input, base + 0);
-    output.instrument_id = load_be32(input, base + 8);
+    output.symbol_id = load_be32(input, base + 8);
     output.price_ticks = load_i64_be(input, base + 12);
     output.quantity = quantity;
     output.side = side;
@@ -98,6 +100,7 @@ inline DecodeError decode_order(const std::span<const std::byte> input,
     output.time_in_force = time_in_force;
     output.order_flags = std::to_integer<std::uint8_t>(input[base + 27]);
     output.reserved = load_be32(input, base + 28);
+    output.sequence_num = load_be32(input, base + 32);
 
     return DecodeError::none;
 }

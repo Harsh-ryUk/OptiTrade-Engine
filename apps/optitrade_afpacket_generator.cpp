@@ -57,7 +57,7 @@ optitrade::wire::MarketDataMessage make_message(
     message.sequence_number = sequence_number;
     message.exchange_timestamp_ns =
         static_cast<std::uint64_t>(sequence_number) * 1000ULL;
-    message.instrument_id = 77;
+    message.symbol_id = sequence_number % 4;
     message.price_ticks = price_ticks;
     message.quantity = quantity;
     message.side = side;
@@ -269,7 +269,7 @@ int main(int argc, char** argv) {
     }
 
     const bool valid =
-        order.instrument_id == 77 &&
+        order.symbol_id == sequence_number % 4 &&
         order.price_ticks == 100100 &&
         order.quantity == 10 &&
         order.side == optitrade::wire::Side::buy;

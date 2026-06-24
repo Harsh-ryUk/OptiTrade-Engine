@@ -12,7 +12,7 @@ int main() {
     input.sequence_number = 8002;
     input.wire_flags = 0x11000022U;
     input.client_order_id = 9000000001ULL;
-    input.instrument_id = 42;
+    input.symbol_id = 0;
     input.price_ticks = 100260;
     input.quantity = 25;
     input.side = Side::sell;
@@ -33,7 +33,7 @@ int main() {
     assert(output.sequence_number == input.sequence_number);
     assert(output.wire_flags == input.wire_flags);
     assert(output.client_order_id == input.client_order_id);
-    assert(output.instrument_id == input.instrument_id);
+    assert(output.symbol_id == input.symbol_id);
     assert(output.price_ticks == input.price_ticks);
     assert(output.quantity == input.quantity);
     assert(output.side == input.side);
@@ -41,6 +41,7 @@ int main() {
     assert(output.time_in_force == input.time_in_force);
     assert(output.order_flags == input.order_flags);
     assert(output.reserved == input.reserved);
+    assert(output.sequence_num == input.sequence_num);
 
     OutboundOrderMessage invalid = input;
     invalid.quantity = 0;

@@ -41,7 +41,7 @@ struct RegimeCounters {
 optitrade::EngineConfig make_engine_config() noexcept {
     optitrade::EngineConfig config{};
 
-    config.instrument_id = 77;
+    config.symbol_id = 0; // Unused in multi-symbol mode
     config.strategy.imbalance_threshold_bps = 6000;
     config.strategy.order_quantity = 10;
 
@@ -113,7 +113,7 @@ optitrade::wire::MarketDataMessage make_market_message(
     message.wire_flags = 0;
     message.exchange_timestamp_ns =
         static_cast<std::uint64_t>(sequence_number) * 1000ULL;
-    message.instrument_id = 77;
+    message.symbol_id = sequence_number % 4;
     message.price_ticks = price_ticks;
     message.quantity = quantity;
     message.side = side;
@@ -300,7 +300,7 @@ bool validate_order(
         return false;
     }
 
-    if (order.instrument_id != 77 || order.quantity != 10) {
+    if (order.symbol_id != 77 || order.quantity != 10) {
         return false;
     }
 
@@ -505,7 +505,8 @@ const char* regime_name(const Regime regime) noexcept {
     return "UNKNOWN";
 }
 
-void print_summary(
+void std::printf("  Total Sequence Gaps:  %u\n", engine.sequence_tracker().get_total_gap_count());
+        print_summary(
     const Regime regime,
     const optitrade::dpdk::LatencySummary& summary) {
     std::printf("%s:\n", regime_name(regime));

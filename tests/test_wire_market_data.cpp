@@ -9,15 +9,15 @@ int main() {
     using namespace optitrade::wire;
 
     static_assert(kWireHeaderBytes == 16);
-    static_assert(kPayloadBytes == 32);
-    static_assert(kWireMessageBytes == 48);
-    static_assert(kEthernetFrameBytesWithoutFcs == 62);
+    static_assert(kPayloadBytes == 50);
+    static_assert(kWireMessageBytes == 66);
+    static_assert(kEthernetFrameBytesWithoutFcs == 80);
 
     MarketDataMessage input{};
     input.sequence_number = 7001;
     input.wire_flags = 0xA0B0C0D0U;
     input.exchange_timestamp_ns = 987654321012345ULL;
-    input.instrument_id = 42;
+    input.symbol_id = 0;
     input.price_ticks = 100250;
     input.quantity = 750;
     input.side = Side::buy;
@@ -37,13 +37,14 @@ int main() {
     assert(output.sequence_number == input.sequence_number);
     assert(output.wire_flags == input.wire_flags);
     assert(output.exchange_timestamp_ns == input.exchange_timestamp_ns);
-    assert(output.instrument_id == input.instrument_id);
+    assert(output.symbol_id == input.symbol_id);
     assert(output.price_ticks == input.price_ticks);
     assert(output.quantity == input.quantity);
     assert(output.side == input.side);
     assert(output.action == input.action);
     assert(output.level == input.level);
     assert(output.source_flags == input.source_flags);
+    assert(output.sequence_num == input.sequence_num);
 
     auto corrupted = encoded;
     corrupted[0] = std::byte{0};

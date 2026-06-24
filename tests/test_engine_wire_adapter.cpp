@@ -18,7 +18,7 @@ optitrade::wire::MarketDataMessage make_market_message(
     optitrade::wire::MarketDataMessage message{};
     message.sequence_number = sequence;
     message.exchange_timestamp_ns = sequence * 1000ULL;
-    message.instrument_id = 77;
+    message.symbol_id = sequence_number % 4;
     message.price_ticks = price_ticks;
     message.quantity = quantity;
     message.side = side;
@@ -43,7 +43,7 @@ optitrade::EngineResult send_to_engine(
 
 int main() {
     optitrade::EngineConfig config{};
-    config.instrument_id = 77;
+    config.symbol_id = 0;
     config.strategy.imbalance_threshold_bps = 6000;
     config.strategy.order_quantity = 10;
     config.risk.max_order_quantity = 100;
@@ -99,7 +99,7 @@ int main() {
     static_assert(sizeof(optitrade::OrderRequest) == 32);
 
     assert(emitted_order.client_order_id == 1);
-    assert(emitted_order.instrument_id == 77);
+    assert(emitted_order.symbol_id == sequence_number % 4);
     assert(emitted_order.price_ticks == 100100);
     assert(emitted_order.quantity == 10);
     assert(emitted_order.side == optitrade::Side::buy);
@@ -124,7 +124,7 @@ int main() {
 
     assert(decoded.sequence_number == 5001);
     assert(decoded.client_order_id == emitted_order.client_order_id);
-    assert(decoded.instrument_id == emitted_order.instrument_id);
+    assert(decoded.symbol_id == emitted_order.symbol_id);
     assert(decoded.price_ticks == emitted_order.price_ticks);
     assert(decoded.quantity == emitted_order.quantity);
     assert(decoded.side == optitrade::wire::Side::buy);
