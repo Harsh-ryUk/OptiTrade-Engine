@@ -35,7 +35,9 @@ struct StrategyDecision {
 
 class ImbalanceStrategy {
 public:
-    explicit ImbalanceStrategy(const StrategyConfig config = {}) noexcept
+    ImbalanceStrategy() noexcept = default;
+
+    explicit ImbalanceStrategy(const StrategyConfig config) noexcept
         : config_(config) {
     }
 
