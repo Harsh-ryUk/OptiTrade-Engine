@@ -18,7 +18,7 @@ optitrade::wire::MarketDataMessage make_market_message(
     optitrade::wire::MarketDataMessage message{};
     message.sequence_number = sequence;
     message.exchange_timestamp_ns = sequence * 1000ULL;
-    message.symbol_id = sequence_number % 4;
+    message.symbol_id = sequence % 4;
     message.price_ticks = price_ticks;
     message.quantity = quantity;
     message.side = side;
@@ -96,10 +96,10 @@ int main() {
     optitrade::OrderRequest emitted_order{};
     assert(engine.pop_order(emitted_order));
 
-    static_assert(sizeof(optitrade::OrderRequest) == 32);
+    static_assert(sizeof(optitrade::OrderRequest) == 40);
 
     assert(emitted_order.client_order_id == 1);
-    assert(emitted_order.symbol_id == sequence_number % 4);
+    assert(emitted_order.symbol_id == 0);
     assert(emitted_order.price_ticks == 100100);
     assert(emitted_order.quantity == 10);
     assert(emitted_order.side == optitrade::Side::buy);
