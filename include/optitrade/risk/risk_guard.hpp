@@ -15,7 +15,9 @@ struct RiskLimits {
 
 class RiskGuard {
 public:
-    explicit RiskGuard(const RiskLimits limits = {}) noexcept
+    RiskGuard() noexcept = default;
+
+    explicit RiskGuard(const RiskLimits limits) noexcept
         : limits_(limits) {
     }
 
