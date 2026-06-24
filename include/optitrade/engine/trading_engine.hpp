@@ -156,8 +156,8 @@ public:
 private:
     EngineConfig config_{};
     std::array<FixedL2Book, 16> books_{};
-    std::array<ImbalanceStrategy, 16> strategies_{};
-    std::array<RiskGuard, 16> risks_{};
+    std::array<ImbalanceStrategy, 16> strategies_;
+    std::array<RiskGuard, 16> risks_;
     std::array<PendingOrderTracker, 16> pending_orders_{};
     PreallocatedOutbox<OutboxCapacity> outbox_{};
     SequenceTracker sequence_tracker_{};
