@@ -146,10 +146,16 @@ if(OPTITRADE_ENABLE_DPDK)
             "${DPDK_LIBDIR}"
             "/usr/lib/x86_64-linux-gnu"
         PATH_SUFFIXES
-            "dpdk/pmds-25.11"
             "dpdk/pmds-26.0"
             "dpdk/pmds-26"
+            "dpdk/pmds-25.11"
             "dpdk/pmds-25"
+            "dpdk/pmds-24.0"
+            "dpdk/pmds-24"
+            "dpdk/pmds-23.11"
+            "dpdk/pmds-23"
+            "dpdk/pmds-22.11"
+            "dpdk/pmds-22"
     )
 
     if(NOT DPDK_NET_RING_LIBRARY)
