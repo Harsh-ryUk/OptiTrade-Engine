@@ -26,7 +26,7 @@ optitrade::wire::MarketDataMessage make_message(
     const std::uint16_t level,
     const std::int64_t price_ticks,
     const std::uint32_t quantity,
-    const std::uint32_t symbol_id = 77) noexcept {
+    [[maybe_unused]] const std::uint32_t symbol_id = 77) noexcept {
     optitrade::wire::MarketDataMessage message{};
     message.sequence_number = sequence_number;
     message.exchange_timestamp_ns =
@@ -85,7 +85,7 @@ void seed_balanced_book(
 }  // namespace
 
 int main() {
-    static_assert(sizeof(optitrade::OrderRequest) == 32);
+    static_assert(sizeof(optitrade::OrderRequest) == 40);
 
     {
         optitrade::TradingEngine<64> engine(make_config());
