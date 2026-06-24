@@ -1,6 +1,6 @@
 # OptiTrade Engine: A C++20 + DPDK Low-Latency Trading Packet Processor
 
-![C++](https://img.shields.io/badge/C++-20-blue.svg) ![DPDK](https://img.shields.io/badge/DPDK-25.11-lightgrey.svg) ![License](https://img.shields.io/badge/License-MIT-green.svg)
+![C++](https://img.shields.io/badge/C++-20-blue.svg) ![DPDK](https://img.shields.io/badge/DPDK-25.11-lightgrey.svg) ![License](https://img.shields.io/badge/License-MIT-green.svg) [![Build Status](https://github.com/Harsh-ryUk/OptiTrade-Engine/actions/workflows/build.yml/badge.svg)](https://github.com/Harsh-ryUk/OptiTrade-Engine/actions)
 
 **Maintained by:** Harsh
 

@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  engine:
+    build: .
+    image: optitrade-engine:latest
+    container_name: optitrade_engine
+    privileged: true
+    network_mode: "host"
+    volumes:
+      - /sys/bus/pci:/sys/bus/pci
+      - /sys/kernel/mm/hugepages:/sys/kernel/mm/hugepages
+      - /dev/hugepages:/dev/hugepages
+    # To run the DPDK AF_PACKET engine, we must first setup the veth interfaces.
+    # In a real environment, you might run the setup script before the command.
+    command: >
+      bash -c "./setup.sh && /usr/local/bin/optitrade_dpdk_afpacket_engine -l 0 --no-pci --no-huge --in-memory --mbuf-pool-ops-name=ring_mp_mc -d librte_net_af_packet.so --vdev=eth_af_packet0,iface=ot_eng,qpairs=1,qdisc_bypass=1 --file-prefix=ot_af_func"
