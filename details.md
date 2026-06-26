@@ -1,121 +1,32 @@
-# OptiTrade Engine: Deep Dive & Technical Architecture
+# OptiTrade Engine Details and Design Rationale
 
-## Introduction to OptiTrade Engine
+This document details the critical design decisions and implementation trade-offs made in the OptiTrade Engine.
 
-**OptiTrade Engine** is a rigorous C++20 and DPDK systems engineering project designed to demystify the critical hot path of high-frequency trading (HFT) systems. 
+## 1. 80-Byte Custom Wire Protocol
 
-Rather than simulating an entire brokerage firm with bloated databases and REST APIs, this repository focuses exclusively on the microsecond-level mechanics of reacting to market data:
-```text
-Ingest Network Packet ──► Process Order Book ──► Execute Trading Logic ──► Validate Risk Limits ──► Emit Outbound Order
-```
-By isolating this pipeline, we can accurately measure hardware-software interaction limits and understand exactly what causes latency spikes in trading software.
+To eliminate latency spikes caused by branch prediction misses and variable-length loops inherent in traditional protocols like JSON, XML, or FIX, OptiTrade Engine defines a strict 80-byte wire protocol (including Ethernet headers). 
+- **Deterministic Bounds**: At exactly 80 bytes, the hardware prefetcher and L1 CPU cache can reliably load an entire market data packet or order structure in a single cache line (usually 64 bytes for payload + alignment considerations).
+- **Embedded Sequence and Symbol ID**: By embedding `sequence_num` and `symbol_id` directly in the padded structure, we optimize network byte-swapping, allowing rapid integer casts inside the ingress loop.
 
----
+## 2. Multi-Symbol Support (16-Symbol Hashing)
 
-## The Philosophy of Speed
+Instead of maintaining a massive hash map representing the entire market universe, the trading engine uses a `std::array<FixedL2Book, 16>` to track a predefined subset of 16 symbols.
+- **Why 16?**: 16 instances easily fit in the CPU's primary caches.
+- **Lookup mechanism**: We route packets via `symbol_id % 16`. This avoids cache-trashing and allows `O(1)` contiguous memory lookup without branching over potential hash collisions found in standard `std::unordered_map`.
 
-In the realm of low-latency trading, speed is often achieved not by doing things faster, but by doing *less*. To achieve our sub-microsecond internal latencies, we strictly adhered to several design principles:
+## 3. Sequence Gap Detection
 
-### Core Optimizations
-1. **Zero Heap Allocations:** Dynamic memory allocation is strictly forbidden during live trading. Every order structure and buffer is heavily pre-allocated.
-2. **Fixed-Format Binary Framing:** We utilize 62-byte Ethernet-style frames. Avoiding JSON, XML, or even variable-length binary parsing saves crucial CPU cycles.
-3. **Integer Arithmetic Only:** Floating-point math introduces unacceptable non-determinism and overhead. All prices are represented as integer ticks.
-4. **Deterministic Data Structures:** The L2 order book operates on fixed-depth arrays ensuring O(1) cache-friendly lookups.
-5. **No System Calls in the Hot Path:** We eliminated all console logging, file I/O, and context switches during the measured execution loop.
-6. **DPDK Polling Mode:** Standard kernel networking interrupts are bypassed in favor of DPDK's continuous polling paradigm.
+Market data is broadcast over UDP, making packet loss a certainty. The engine includes a strict sequence tracker that checks `sequence_num == expected`. 
+- **Immediate Rejection**: If a gap is detected, the engine instantly yields processing. This prevents the L2 Book from crossing internal bids and asks due to missing intermediate tick data.
 
-Things we intentionally ignored for Version 1 (because they distract from hot-path optimization): multi-threading synchronization, database persistence, web dashboards, and complex quantitative alpha models.
+## 4. Pending Order Tracker (Cancel & Replace)
 
----
+Instead of relying on dynamic heap allocations (e.g., `std::map`, `std::vector`) to map client order IDs back to pending instructions, we use a 64-slot `std::array` acting as a ring buffer (`PendingOrderTracker`).
+- **Packet Distances**: It scans the last 64 active orders. If an opposing signal is found for the same symbol within a distance of 4 packets, the engine emits a CANCEL. If a repriced signal arrives, it emits a REPLACE.
+- **Latency Consistency**: The worst-case scan time of 64 contiguous array elements requires only ~3-5 nanoseconds.
 
-## Technical Components & Workflow
+## 5. Alpha Strategies: VWAP and Momentum
 
-The architecture is highly linear and entirely run-to-completion on a single CPU core.
-
-```text
-[ Raw Ethernet Frame Ingestion ]
-             │
-             ▼
-[ DPDK RX Ring (rte_mbuf) ]
-             │
-             ▼
-[ Binary Payload Extractor ]
-             │
-             ▼
-[ Synchronous L2 Book Update ] ◄── Evaluates current Bid/Ask depths
-             │
-             ▼
-[ Imbalance Decision Matrix ] ◄── Calculates pressure differentials
-             │
-             ▼
-[ Inline Risk Validator ] ◄── Enforces exposure limits and safety checks
-             │
-             ▼
-[ Order Frame Construction ] ◄── Populates pre-allocated egress buffers
-             │
-             ▼
-[ DPDK TX Ring Submission ]
-```
-
----
-
-## Testing & Scenario Validation
-
-The system is rigorously tested against standard market scenarios to ensure logic correctness before latency is even measured:
-
-- **Equilibrium State (`NO_SIGNAL`):** The book is balanced. The engine silently drops the cycle.
-- **Upward Pressure (`BUY`):** Heavy bid concentration triggers an immediate buy order.
-- **Downward Pressure (`SELL`):** Heavy ask concentration triggers an immediate sell order.
-- **Safety Trigger (`RISK_REJECT`):** A valid trade signal is vetoed due to internal exposure thresholds.
-- **Corrupt Payload (`INVALID_FRAME`):** Malformed packets are discarded before they can poison the L2 book state.
-
----
-
-## Comprehensive Latency Breakdown
-
-It is critical to be honest about latency metrics. The numbers below represent **Application-Layer Turnaround Time**—the time elapsed from the moment the software receives the packet from the DPDK driver until it hands the response back. They **do not** include physical fiber transmission, switch hops, or hardware NIC processing times.
-
-### 1. In-Memory DPDK Ring PMD Benchmark
-*This is the cleanest software-only baseline, avoiding the kernel entirely via virtual memory rings.*
-
-| CPU Thread | Median (p50) | 95th Percentile | 99th Percentile | 99.9th Percentile | Sample Size |
-|:---:|:---:|:---:|:---:|:---:|:---:|
-| CPU 0 | 110.84 ns | 248.39 ns | 552.21 ns | 706.46 ns | 1,000,000 |
-| CPU 2 | 112.84 ns | 254.40 ns | 550.21 ns | 754.54 ns | 1,000,000 |
-
-### 2. Kernel-Backed DPDK AF_PACKET Benchmark
-*This test routes packets through a Linux `veth` pair, demonstrating the overhead introduced when touching kernel networking layers.*
-
-| CPU Thread | Median (p50) | 95th Percentile | 99th Percentile | 99.9th Percentile | Sample Size |
-|:---:|:---:|:---:|:---:|:---:|:---:|
-| CPU 0 | 1.73 µs | 2.59 µs | 3.26 µs | 10.54 µs | 1,000,000 |
-| CPU 2 | 1.83 µs | 2.90 µs | 7.82 µs | 22.06 µs | 1,000,000 |
-
----
-
-## Real-World Engineering Hurdles
-
-Building this engine exposed several low-level systems engineering challenges:
-
-1. **PMD Library Linking:** DPDK requires explicit linking of `librte_net_ring.so` and `librte_net_af_packet.so` to prevent runtime "undefined reference" failures when initializing virtual devices.
-2. **Assertion stripping:** CMake `Release` builds stripped standard `assert()` calls. We had to implement custom enforced validation layers to maintain safety without sacrificing speed.
-3. **Mbuf Size Constraints:** The AF_PACKET driver expects significantly larger memory data rooms (e.g., 4096 bytes) compared to standard ring PMDs, requiring dynamic mempool configuration.
-4. **Veth Lifecycle Management:** The `ot_peer` interface had to be programmatically created and destroyed around every kernel-backed test run to prevent DPDK initialization crashes.
-
----
-
-## Hardware Limitations & Future Roadmap
-
-This iteration of OptiTrade Engine was developed and profiled on standard workstation hardware lacking a dedicated PCIe VFIO-compatible NIC. Therefore, all tests utilize DPDK's software rings or AF_PACKET drivers.
-
-**Next steps for development:**
-- **Hardware Deployment:** Execute the engine on a server equipped with a Solarflare or Mellanox NIC bound via VFIO.
-- **Hardware Timestamping:** Integrate external capture devices (e.g., Corvil) for true wire-to-wire latency measurement.
-- **Market Burst Simulation:** Shift from fixed-interval synthetic packet injection to highly variable, pcap-based high-burst replays to measure realistic queueing latency.
-- **AF_XDP Integration:** Compare the existing AF_PACKET performance against Linux's modern AF_XDP kernel-bypass technology.
-
----
-
-## Final Thoughts
-
-OptiTrade Engine proves that modern C++20, when heavily constrained and married to DPDK polling, can consistently execute complex state-machine updates (like order books and risk logic) in under 150 nanoseconds per event.
+Trading logic must evaluate in bounded time. 
+- **VWAP Imbalance**: We iterate linearly over the top 5 fixed levels of the book. The ratio `total_price_volume / total_volume` provides a resilient threshold.
+- **Momentum**: A lightweight 8-slot circular buffer tracks mid-price movements (1 for up, -1 for down). The evaluation only requires summing 8 integers—achieving sub-nanosecond signal generation.

@@ -7,7 +7,11 @@
 #include "optitrade/order/order_request.hpp"
 #include "optitrade/order/preallocated_outbox.hpp"
 #include "optitrade/risk/risk_guard.hpp"
-#include "optitrade/strategy/imbalance_strategy.hpp"
+#if defined(OPTITRADE_STRATEGY_MOMENTUM)
+#include "optitrade/strategy/momentum.hpp"
+#else
+#include "optitrade/strategy/vwap_imbalance.hpp"
+#endif
 #include "optitrade/common/sequence_tracker.hpp"
 #include "optitrade/order/pending_order_tracker.hpp"
 
@@ -30,9 +34,15 @@ struct EngineConfig {
 
 struct EngineResult {
     EngineStatus status{EngineStatus::no_order};
-    Signal signal{Signal::no_signal};
+    Signal signal{Signal::hold};
     std::int64_t imbalance_bps{};
 };
+
+#if defined(OPTITRADE_STRATEGY_MOMENTUM)
+using ActiveStrategy = MomentumStrategy;
+#else
+using ActiveStrategy = VWAPImbalanceStrategy;
+#endif
 
 template <std::size_t OutboxCapacity = 64>
 class TradingEngine {
@@ -40,7 +50,7 @@ public:
     explicit TradingEngine(const EngineConfig config = {}) noexcept
         : config_(config) {
         for (auto& s : strategies_) {
-            s = ImbalanceStrategy{config.strategy};
+            s = ActiveStrategy{config.strategy};
         }
         for (auto& r : risks_) {
             r = RiskGuard{config.risk};
@@ -52,7 +62,7 @@ public:
         if (!sequence_tracker_.check_and_update(update.symbol_id, update.sequence_num)) {
             return {
                 EngineStatus::gap_detected,
-                Signal::no_signal,
+                Signal::hold,
                 0,
             };
         }
@@ -62,17 +72,17 @@ public:
         if (!books_[index].apply(update)) {
             return {
                 EngineStatus::invalid_update,
-                Signal::no_signal,
+                Signal::hold,
                 0,
             };
         }
 
         const StrategyDecision decision = strategies_[index].evaluate(books_[index]);
 
-        if (decision.signal == Signal::no_signal) {
+        if (decision.signal == Signal::hold) {
             return {
                 EngineStatus::no_order,
-                Signal::no_signal,
+                Signal::hold,
                 decision.imbalance_bps,
             };
         }
@@ -96,10 +106,36 @@ public:
         order.order_kind = OrderKind::limit;
         order.flags = 0;
 
-        if (pending_orders_[index].get_pending().has_value()) {
-            order.message_type = MessageType::replace;
+        auto recent_opt = pending_orders_[index].find_recent_active_order(update.sequence_number);
+        bool needs_cancel = false;
+        OrderRequest cancel_order{};
+
+        if (recent_opt.has_value()) {
+            const auto& recent = recent_opt.value();
+            if (recent.side != order.side) {
+                cancel_order = recent;
+                cancel_order.message_type = MessageType::cancel;
+                needs_cancel = true;
+                order.message_type = MessageType::new_order;
+                pending_orders_[index].remove_order(recent.client_order_id);
+            } else if (recent.price_ticks != order.price_ticks) {
+                order.message_type = MessageType::replace;
+                pending_orders_[index].remove_order(recent.client_order_id);
+            } else {
+                order.message_type = MessageType::new_order;
+            }
         } else {
             order.message_type = MessageType::new_order;
+        }
+
+        if (needs_cancel) {
+            if (!risks_[index].validate_and_commit(cancel_order) || !outbox_.push(cancel_order)) {
+                return {
+                    EngineStatus::outbox_full,
+                    decision.signal,
+                    decision.imbalance_bps,
+                };
+            }
         }
 
         if (!risks_[index].validate_and_commit(order)) {
@@ -118,11 +154,7 @@ public:
             };
         }
 
-        if (order.message_type == MessageType::replace) {
-            pending_orders_[index].replace_order(order);
-        } else {
-            pending_orders_[index].add_order(order);
-        }
+        pending_orders_[index].add_order(order);
 
         ++next_client_order_id_;
 
@@ -156,8 +188,8 @@ public:
 private:
     EngineConfig config_{};
     std::array<FixedL2Book, 16> books_{};
-    std::array<ImbalanceStrategy, 16> strategies_;
-    std::array<RiskGuard, 16> risks_;
+    std::array<ActiveStrategy, 16> strategies_{};
+    std::array<RiskGuard, 16> risks_{};
     std::array<PendingOrderTracker, 16> pending_orders_{};
     PreallocatedOutbox<OutboxCapacity> outbox_{};
     SequenceTracker sequence_tracker_{};

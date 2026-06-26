@@ -36,6 +36,7 @@ struct RegimeCounters {
     std::uint64_t buy_orders{};
     std::uint64_t sell_orders{};
     std::uint64_t failures{};
+    std::uint32_t gap_count{};
 };
 
 optitrade::EngineConfig make_engine_config() noexcept {
@@ -505,8 +506,7 @@ const char* regime_name(const Regime regime) noexcept {
     return "UNKNOWN";
 }
 
-void std::printf("  Total Sequence Gaps:  %u\n", engine.sequence_tracker().get_total_gap_count());
-        print_summary(
+void print_summary(
     const Regime regime,
     const optitrade::dpdk::LatencySummary& summary) {
     std::printf("%s:\n", regime_name(regime));
@@ -592,6 +592,7 @@ bool benchmark_regime(
         }
     }
 
+    output_counters.gap_count = engine.sequence_tracker().get_total_gap_count();
     output_summary = recorder.summarize();
     return true;
 }
@@ -715,7 +716,7 @@ int main(int argc, char** argv) {
                     optitrade::wire::kEthernetFrameBytesWithoutFcs);
         std::printf("Warmup per regime:        %zu\n",
                     kWarmupEventsPerRegime);
-        std::printf("Measured per regime:      %zu\n",
+        std::printf("  Measured per regime:      %zu\n",
                     kMeasuredEventsPerRegime);
         std::printf("\n");
 
@@ -757,6 +758,10 @@ int main(int argc, char** argv) {
                         no_signal_counters.failures +
                         buy_counters.failures +
                         sell_counters.failures));
+        std::printf("  Total sequence gaps:   %u\n",
+                    no_signal_counters.gap_count +
+                    buy_counters.gap_count +
+                    sell_counters.gap_count);
         std::printf("\n");
 
         std::printf("Virtual port counters including seeding and warmup:\n");

@@ -85,7 +85,18 @@ public:
         output.price_ticks = input.price_ticks;
         output.quantity = input.quantity;
         output.side = side;
-        output.order_type = wire::OrderType::limit;
+        switch (input.message_type) {
+            case MessageType::cancel:
+                output.order_type = wire::OrderType::cancel;
+                break;
+            case MessageType::replace:
+                output.order_type = wire::OrderType::replace;
+                break;
+            case MessageType::new_order:
+            default:
+                output.order_type = wire::OrderType::limit;
+                break;
+        }
         output.time_in_force = wire::TimeInForce::immediate_or_cancel;
         output.order_flags =
             static_cast<std::uint8_t>(input.flags & 0xFFU);

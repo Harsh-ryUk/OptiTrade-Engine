@@ -21,7 +21,7 @@ enum class UpdateAction : std::uint8_t {
 };
 
 enum class Signal : std::uint8_t {
-    no_signal = 0,
+    hold = 0,
     buy = 1,
     sell = 2,
 };

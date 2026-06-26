@@ -35,6 +35,8 @@ enum class UpdateAction : std::uint8_t {
 
 enum class OrderType : std::uint8_t {
     limit = 1,
+    cancel = 2,
+    replace = 3,
 };
 
 enum class TimeInForce : std::uint8_t {
@@ -54,7 +56,9 @@ constexpr bool is_valid_update_action(const UpdateAction value) noexcept {
 }
 
 constexpr bool is_valid_order_type(const OrderType value) noexcept {
-    return value == OrderType::limit;
+    return value == OrderType::limit ||
+           value == OrderType::cancel ||
+           value == OrderType::replace;
 }
 
 constexpr bool is_valid_time_in_force(const TimeInForce value) noexcept {

@@ -1,48 +1,59 @@
 #!/usr/bin/env python3
-
+# Author: Harsh
 import sys
 import re
+import os
 import matplotlib.pyplot as plt
 
-def parse_benchmark_output(filepath):
-    percentiles = []
-    latencies = []
-    
-    with open(filepath, 'r') as f:
+def parse_log(file_path):
+    metrics = {}
+    pattern = re.compile(r'p(50|95|99|99\.9)\s+latency:\s+([\d.]+)\s+ns')
+    with open(file_path, 'r') as f:
         for line in f:
-            match = re.search(r'(Mean|p50|p95|p99|p99\.9|Maximum)\s+latency:\s+([\d.]+)\s+ns', line)
+            match = pattern.search(line)
             if match:
-                metric = match.group(1)
-                latency = float(match.group(2))
-                percentiles.append(metric)
-                latencies.append(latency)
+                key = f"p{match.group(1)}"
+                val = float(match.group(2))
+                if key not in metrics:
+                    metrics[key] = val
+    return metrics
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: python3 plot_latency.py <benchmark_output.txt>")
+        sys.exit(1)
+        
+    file_path = sys.argv[1]
+    if not os.path.exists(file_path):
+        print(f"File not found: {file_path}")
+        sys.exit(1)
+        
+    metrics = parse_log(file_path)
+    if not metrics:
+        print("No latency metrics found in file.")
+        sys.exit(1)
+        
+    print("Latency Summary Table")
+    print("-" * 30)
+    for k, v in metrics.items():
+        print(f"{k:10} | {v:10.3f} ns")
+    print("-" * 30)
     
-    return percentiles, latencies
-
-def plot_latency(percentiles, latencies, output_file="latency_plot.png"):
-    if not percentiles:
-        print("No latency data found in the provided file.")
-        return
-
-    plt.figure(figsize=(10, 6))
-    plt.bar(percentiles, latencies, color='skyblue')
-    plt.xlabel('Metric')
+    os.makedirs('results', exist_ok=True)
+    
+    labels = list(metrics.keys())
+    values = list(metrics.values())
+    
+    plt.figure(figsize=(8, 5))
+    plt.bar(labels, values, color=['blue', 'orange', 'green', 'red'])
+    plt.xlabel('Percentiles')
     plt.ylabel('Latency (ns)')
-    plt.title('OptiTrade Engine - Latency Benchmark Results')
-    plt.yscale('log')
+    plt.title('Latency Percentiles')
     plt.grid(axis='y', linestyle='--', alpha=0.7)
     
-    for i, v in enumerate(latencies):
-        plt.text(i, v, f"{v:.1f}", ha='center', va='bottom')
-
-    plt.savefig(output_file)
-    print(f"Plot saved to {output_file}")
+    out_path = os.path.join('results', 'latency_chart.png')
+    plt.savefig(out_path)
+    print(f"Chart saved to {out_path}")
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python plot_latency.py <benchmark_output.txt>")
-        sys.exit(1)
-    
-    filepath = sys.argv[1]
-    percentiles, latencies = parse_benchmark_output(filepath)
-    plot_latency(percentiles, latencies)
+    main()

@@ -25,8 +25,16 @@ jobs:
     - name: Build
       run: cmake --build build-dpdk -j$(nproc)
 
-    - name: Run optitrade_hello
-      run: ./build-dpdk/optitrade_hello
+    - name: Install Python Dependencies
+      run: pip3 install matplotlib --break-system-packages
 
     - name: Run Tests
       run: ctest --test-dir build-dpdk --output-on-failure
+
+    - name: Run Latency Plot Tool
+      run: |
+        echo "p50 latency: 1.0 ns" > dummy_log.txt
+        echo "p95 latency: 2.0 ns" >> dummy_log.txt
+        echo "p99 latency: 3.0 ns" >> dummy_log.txt
+        echo "p99.9 latency: 4.0 ns" >> dummy_log.txt
+        python3 tools/plot_latency.py dummy_log.txt

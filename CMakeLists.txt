@@ -8,6 +8,10 @@ project(OptiTradeEngine
 option(OPTITRADE_ENABLE_DPDK "Build DPDK applications and benchmarks" ON)
 option(OPTITRADE_BUILD_BENCHMARKS "Build latency benchmark executables" ON)
 
+set(OPTITRADE_STRATEGY "vwap_imbalance" CACHE STRING "Trading strategy to compile (vwap_imbalance, momentum)")
+if(OPTITRADE_STRATEGY STREQUAL "momentum")
+    add_compile_definitions(OPTITRADE_STRATEGY_MOMENTUM)
+endif()
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -94,6 +98,11 @@ optitrade_add_test(
 optitrade_add_test(
     optitrade_test_engine_scenarios
     tests/test_engine_scenarios.cpp
+)
+
+optitrade_add_test(
+    optitrade_test_cancel_replace
+    tests/test_cancel_replace.cpp
 )
 
 # ---------------------------------------------------------------------------
@@ -250,5 +259,3 @@ if(OPTITRADE_ENABLE_DPDK)
     endif()
 endif()
 
-add_executable(optitrade_hello apps/optitrade_hello.cpp)
-target_link_libraries(optitrade_hello PRIVATE optitrade_headers)
