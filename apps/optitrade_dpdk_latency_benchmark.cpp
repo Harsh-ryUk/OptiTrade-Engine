@@ -90,7 +90,7 @@ optitrade::wire::MarketDataMessage make_message(
     message.wire_flags = 0;
     message.exchange_timestamp_ns =
         static_cast<std::uint64_t>(sequence) * 1000ULL;
-    message.symbol_id = sequence_number % 4;
+    message.symbol_id = sequence % 4;
     message.price_ticks = price_ticks;
     message.quantity = quantity;
     message.side = side;
@@ -378,7 +378,7 @@ bool run_order_iteration(
         return false;
     }
 
-    engine.acknowledge_one_order();
+    engine.acknowledge_one_order(decoded_message.symbol_id);
 
     if (validate_outbound) {
         optitrade::wire::EthernetEnvelope decoded_envelope{};

@@ -390,7 +390,7 @@ bool run_regime_iteration(
 
     if (regime == Regime::no_signal) {
         if (result.status != optitrade::EngineStatus::no_order ||
-            result.signal != optitrade::Signal::no_signal) {
+            result.signal != optitrade::Signal::hold) {
             ++counters.failures;
             return false;
         }
@@ -476,7 +476,7 @@ bool run_regime_iteration(
         return false;
     }
 
-    engine.acknowledge_one_order();
+    engine.acknowledge_one_order(decoded_message.symbol_id);
 
     if (validate_output &&
         !validate_order(received_order_frame, regime)) {

@@ -39,6 +39,7 @@ struct Counters {
     std::uint64_t orders_emitted{};
     std::uint64_t risk_rejected{};
     std::uint64_t outbox_full{};
+    std::uint64_t gap_detected{};
 };
 
 void print_port_error(const char* operation,
@@ -318,6 +319,10 @@ int main(int argc, char** argv) {
                     ++counters.no_signal_events;
                     break;
 
+                case optitrade::EngineStatus::gap_detected:
+                    ++counters.gap_detected;
+                    break;
+
                 case optitrade::EngineStatus::risk_rejected:
                     ++counters.risk_rejected;
                     break;
@@ -380,6 +385,9 @@ int main(int argc, char** argv) {
         std::printf("  Invalid packets:          %llu\n",
                     static_cast<unsigned long long>(
                         counters.invalid_packets));
+        std::printf("  Gap detected:             %llu\n",
+                    static_cast<unsigned long long>(
+                        counters.gap_detected));
         std::printf("  Risk rejected:            %llu\n",
                     static_cast<unsigned long long>(
                         counters.risk_rejected));
