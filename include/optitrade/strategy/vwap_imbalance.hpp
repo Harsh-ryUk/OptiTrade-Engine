@@ -8,7 +8,18 @@
 
 namespace optitrade {
 
-#include "optitrade/strategy/strategy_types.hpp"
+struct StrategyConfig {
+    std::int32_t order_quantity{0};
+    std::int64_t imbalance_threshold_bps{0};
+    // extend with other config fields the strategies need
+};
+
+struct StrategyDecision {
+    Signal signal{Signal::hold};
+    std::int64_t imbalance_bps{0};
+    PriceTicks limit_price_ticks{0};
+    std::int32_t quantity{0};
+};
 
 
 class VWAPImbalanceStrategy {
@@ -39,7 +50,7 @@ public:
         }
 
         if (total_bid_vol == 0.0 || total_ask_vol == 0.0) {
-            return {Signal::hold, 0, 0, 0};
+            return StrategyDecision{Signal::hold, 0, 0, 0};
         }
 
         double vwap_bid = bid_price_vol / total_bid_vol;
