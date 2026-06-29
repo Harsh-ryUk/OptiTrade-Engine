@@ -462,6 +462,8 @@ int main(int argc, char** argv) {
         std::printf("  Invalid filtered frames: %llu\n",
                     static_cast<unsigned long long>(
                         counters.invalid_packets));
+        std::printf("  Sequence Gaps:           %u\n",
+                    engine.sequence_tracker().get_total_gap_count());
         std::printf("  Failures:                %llu\n",
                     static_cast<unsigned long long>(
                         counters.failures));

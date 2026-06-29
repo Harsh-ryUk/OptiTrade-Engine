@@ -405,8 +405,7 @@ bool run_order_iteration(
     return true;
 }
 
-void std::printf("  Total Sequence Gaps:  %u\n", engine.sequence_tracker().get_total_gap_count());
-        print_summary(
+void print_summary(
     const char* label,
     const optitrade::dpdk::LatencySummary& summary) {
     std::printf("%s\n", label);
@@ -592,6 +591,8 @@ int main(int argc, char** argv) {
                 std::printf("  Failures:              %llu\n",
                             static_cast<unsigned long long>(
                                 measured_counters.failures));
+                std::printf("  Sequence Gaps:         %u\n",
+                            engine.sequence_tracker().get_total_gap_count());
                 std::printf("\n");
 
                 std::printf("Virtual port counters including setup and warmup:\n");
