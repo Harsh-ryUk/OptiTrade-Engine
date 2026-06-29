@@ -14,6 +14,7 @@
 #endif
 #include "optitrade/common/sequence_tracker.hpp"
 #include "optitrade/order/pending_order_tracker.hpp"
+#include "optitrade/strategy/strategy_types.hpp"
 
 namespace optitrade {
 
@@ -50,16 +51,16 @@ public:
     explicit TradingEngine(const EngineConfig config = {}) noexcept
         : config_(config) {
         for (auto& s : strategies_) {
-            s = ActiveStrategy{config.strategy};
+            s = ActiveStrategy(config.strategy);
         }
         for (auto& r : risks_) {
-            r = RiskGuard{config.risk};
+            r = RiskGuard(config.risk);
         }
     }
 
     [[nodiscard]] EngineResult on_market_update(
         const MarketUpdate& update) noexcept {
-        if (!sequence_tracker_.check_and_update(update.symbol_id, update.sequence_num)) {
+        if (!sequence_tracker_.check_and_update(update.symbol_id, update.sequence_number)) {
             return {
                 EngineStatus::gap_detected,
                 Signal::hold,
@@ -187,12 +188,12 @@ public:
 
 private:
     EngineConfig config_{};
-    std::array<FixedL2Book, 16> books_{};
-    std::array<ActiveStrategy, 16> strategies_{};
-    std::array<RiskGuard, 16> risks_{};
-    std::array<PendingOrderTracker, 16> pending_orders_{};
-    PreallocatedOutbox<OutboxCapacity> outbox_{};
-    SequenceTracker sequence_tracker_{};
+    std::array<FixedL2Book, 16> books_;
+    std::array<ActiveStrategy, 16> strategies_;
+    std::array<RiskGuard, 16> risks_;
+    std::array<PendingOrderTracker, 16> pending_orders_;
+    PreallocatedOutbox<OutboxCapacity> outbox_;
+    SequenceTracker sequence_tracker_;
     std::uint64_t next_client_order_id_{1};
 };
 
