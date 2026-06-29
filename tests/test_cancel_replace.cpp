@@ -24,8 +24,9 @@ int main() {
     buy_update.action = optitrade::UpdateAction::modify;
     buy_update.level = 0;
 
+    // Use the result to avoid unused-variable warning being treated as error
     auto res = engine.on_market_update(buy_update);
-    // Might not trigger immediately depending on strategy, but we just need a compile check for now.
+    (void)res;
     
     std::cout << "test_cancel_replace pass\n";
     return 0;
