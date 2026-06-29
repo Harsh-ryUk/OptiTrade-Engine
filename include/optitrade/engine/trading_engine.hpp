@@ -14,7 +14,6 @@
 #endif
 #include "optitrade/common/sequence_tracker.hpp"
 #include "optitrade/order/pending_order_tracker.hpp"
-#include "optitrade/strategy/strategy_types.hpp"
 
 namespace optitrade {
 
