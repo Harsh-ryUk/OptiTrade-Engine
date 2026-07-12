@@ -106,20 +106,26 @@ public:
         order.order_kind = OrderKind::limit;
         order.flags = 0;
 
-        auto recent_opt = pending_orders_[index].find_recent_active_order(update.sequence_number);
+        auto* recent_opt = pending_orders_[index].find_recent_active_order(update.sequence_number);
         bool needs_cancel = false;
         OrderRequest cancel_order{};
 
-        if (recent_opt.has_value()) {
-            const auto& recent = recent_opt.value();
+        if (recent_opt) {
+            const auto& recent = recent_opt->request;
             if (recent.side != order.side) {
                 cancel_order = recent;
                 cancel_order.message_type = MessageType::cancel;
                 needs_cancel = true;
                 order.message_type = MessageType::new_order;
+                
+                // Cancel from OrderBook
+                active_orders_book_[index].cancel_order(recent_opt->book_order);
                 pending_orders_[index].remove_order(recent.client_order_id);
             } else if (recent.price_ticks != order.price_ticks) {
                 order.message_type = MessageType::replace;
+                
+                // Cancel from OrderBook
+                active_orders_book_[index].cancel_order(recent_opt->book_order);
                 pending_orders_[index].remove_order(recent.client_order_id);
             } else {
                 order.message_type = MessageType::new_order;
@@ -154,7 +160,14 @@ public:
             };
         }
 
-        pending_orders_[index].add_order(order);
+        // Add to OrderBook
+        Order* new_book_order = active_orders_book_[index].add_order(
+            order.client_order_id, 
+            order.side, 
+            order.price_ticks, 
+            order.quantity
+        );
+        pending_orders_[index].add_order(order, new_book_order);
 
         ++next_client_order_id_;
 
@@ -187,12 +200,13 @@ public:
 
 private:
     EngineConfig config_{};
-    std::array<FixedL2Book, 16> books_;
-    std::array<ActiveStrategy, 16> strategies_;
-    std::array<RiskGuard, 16> risks_;
-    std::array<PendingOrderTracker, 16> pending_orders_;
-    PreallocatedOutbox<OutboxCapacity> outbox_;
-    SequenceTracker sequence_tracker_;
+    std::array<FixedL2Book, 16> books_{};
+    std::array<ActiveStrategy, 16> strategies_{};
+    std::array<RiskGuard, 16> risks_{};
+    std::array<PendingOrderTracker, 16> pending_orders_{};
+    std::array<OrderBook<1000, 1024>, 16> active_orders_book_{};
+    PreallocatedOutbox<OutboxCapacity> outbox_{};
+    SequenceTracker sequence_tracker_{};
     std::uint64_t next_client_order_id_{1};
 };
 

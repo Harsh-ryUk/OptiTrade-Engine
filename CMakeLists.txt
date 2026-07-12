@@ -256,6 +256,12 @@ if(OPTITRADE_ENABLE_DPDK)
             optitrade_dpdk_afpacket_latency
             apps/optitrade_dpdk_afpacket_latency.cpp
         )
+        
+        # New TSC-based latency suite for OrderBook
+        add_executable(optitrade_latency_suite
+            ${PROJECT_SOURCE_DIR}/benchmarks/latency_suite.cpp
+        )
+        target_compile_options(optitrade_latency_suite PRIVATE -O3 -march=native)
     endif()
 endif()
 
