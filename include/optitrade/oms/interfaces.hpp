@@ -51,6 +51,13 @@ public:
     virtual void on_order_update(const OrderInfo& info) = 0;
 };
 
+// Maps an instrument index to the symbol text sent on the wire.
+class SymbolSource {
+public:
+    virtual ~SymbolSource() = default;
+    virtual Symbol symbol(Locate locate) const = 0;
+};
+
 // Price used by pre-trade risk checks (fat-finger band). 0 means "none available".
 class ReferenceSource {
 public:
