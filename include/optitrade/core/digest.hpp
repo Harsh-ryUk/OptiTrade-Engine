@@ -17,6 +17,8 @@ public:
         }
     }
     // Feeds the value byte by byte, least significant first (endian independent).
+    // Narrower and signed integers convert implicitly, i.e. they are zero/sign
+    // extended to eight bytes, which is stable across platforms.
     void update(std::uint64_t v) noexcept {
         for (int i = 0; i < 8; ++i) {
             h_ ^= (v >> (8 * i)) & 0xFF;

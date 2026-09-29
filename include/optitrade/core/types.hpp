@@ -28,6 +28,12 @@ constexpr Side opposite(Side s) noexcept {
 constexpr std::size_t index(Side s) noexcept { return static_cast<std::size_t>(s); }
 
 // Eight ASCII characters, right padded with spaces (the ITCH/OUCH "Stock" field).
+//
+// The eight bytes are kept exactly as given, so a symbol decoded from the wire is
+// echoed back unchanged in order entry. Consequently operator== and the hash are
+// byte-wise: "AAPL    " (space padded, the protocol form) and "AAPL\0\0\0\0" are
+// different keys even though view() shows both as "AAPL". Real feeds always pad
+// with spaces; view() tolerates NUL padding only for display.
 class Symbol {
 public:
     static constexpr std::size_t kSize = 8;
@@ -46,7 +52,8 @@ public:
 
     constexpr const std::array<char, kSize>& raw() const noexcept { return chars_; }
 
-    // Text without the trailing padding.
+    // Text without the trailing padding. The view points into this object and is
+    // only valid while the Symbol is alive.
     constexpr std::string_view view() const noexcept {
         std::size_t n = kSize;
         while (n > 0 && (chars_[n - 1] == ' ' || chars_[n - 1] == '\0')) --n;
