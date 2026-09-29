@@ -3,18 +3,12 @@
 #include <cstdint>
 #include <array>
 #include <cstddef>
-#include <limits>
+
+#include "optitrade/common/types.hpp"
 
 namespace optitrade {
 
 using OrderId = std::uint64_t;
-using PriceTicks = std::int64_t;
-using Quantity = std::uint32_t;
-
-enum class Side : std::uint8_t {
-    buy = 1,
-    sell = 2,
-};
 
 // Cache-line aligned Order for intrusive linked list
 struct alignas(64) Order {
@@ -173,7 +167,7 @@ public:
 private:
     // Simple fast hashing for demo bounds
     [[nodiscard]] inline std::size_t get_level_index(PriceTicks price) const noexcept {
-        return static_cast<std::size_t>(price % MaxLevels);
+        return static_cast<std::size_t>(static_cast<std::uint64_t>(price) % MaxLevels);
     }
 
     OrderPool<MaxOrders> pool_{};

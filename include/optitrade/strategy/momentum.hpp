@@ -12,18 +12,18 @@ namespace optitrade {
 
 class MomentumStrategy {
 public:
-    explicit MomentumStrategy(const StrategyConfig config = {}) noexcept
+    MomentumStrategy(const StrategyConfig config = {}) noexcept
         : config_(config) {}
 
     [[nodiscard]] StrategyDecision evaluate(const FixedL2Book& book) noexcept {
-        const auto& bids = book.bids();
-        const auto& asks = book.asks();
+        const auto best_bid = book.best_bid();
+        const auto best_ask = book.best_ask();
 
-        if (bids.empty() || asks.empty() || bids[0].quantity == 0 || asks[0].quantity == 0) {
+        if (!best_bid || !best_ask) {
             return {Signal::hold, 0, 0, 0};
         }
 
-        double mid_price = (static_cast<double>(bids[0].price_ticks) + asks[0].price_ticks) / 2.0;
+        double mid_price = (static_cast<double>(*best_bid) + static_cast<double>(*best_ask)) / 2.0;
 
         if (last_mid_price_.has_value()) {
             int direction = 0;
@@ -57,10 +57,10 @@ public:
 
             if (ups >= 6) {
                 decision.signal = Signal::buy;
-                decision.limit_price_ticks = asks[0].price_ticks;
+                decision.limit_price_ticks = *best_ask;
             } else if (downs >= 6) {
                 decision.signal = Signal::sell;
-                decision.limit_price_ticks = bids[0].price_ticks;
+                decision.limit_price_ticks = *best_bid;
             }
         }
 

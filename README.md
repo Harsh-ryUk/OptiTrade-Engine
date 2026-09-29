@@ -55,7 +55,7 @@ With its zero-copy ring buffers, deterministic lock-free queues, and no dynamic 
 - **Sequence Gap Detection**: Built-in UDP multicast sequence tracker that instantly flags and drops bad packet runs to ensure data integrity.
 - **Cancel & Replace Handlers**: A lock-free 64-slot ring buffer tracks pending outbound orders. Generates immediate CANCEL or REPLACE logic if market conditions flip before exchange acknowledgment.
 - **Pluggable Strategies**: Switch models at compile-time with `-DOPTITRADE_STRATEGY=momentum` or `vwap_imbalance`.
-  - **VWAP Imbalance**: Evaluates total VWAP of bids vs. asks across all L2 levels. Triggers when one side exceeds the other by 0.1%.
+  - **VWAP Imbalance**: Compares total resting bid vs. ask quantity across the 5 visible L2 levels. Buys/sells when the imbalance exceeds `imbalance_threshold_bps` (default 6000 = 60%).
   - **Momentum**: Tracks the last 8 mid-price ticks in a circular buffer. Fires if 6 of the last 8 are strongly directional.
 
 ## Wire Protocol Specification

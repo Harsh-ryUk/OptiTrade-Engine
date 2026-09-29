@@ -5,70 +5,39 @@
 
 #include "optitrade/book/fixed_l2_book.hpp"
 #include "optitrade/common/types.hpp"
+#include "optitrade/strategy/strategy_types.hpp"
 
 namespace optitrade {
-
-struct StrategyConfig {
-    std::int32_t order_quantity{0};
-    std::int64_t imbalance_threshold_bps{0};
-    // extend with other config fields the strategies need
-};
-
-struct StrategyDecision {
-    Signal signal{Signal::hold};
-    std::int64_t imbalance_bps{0};
-    PriceTicks limit_price_ticks{0};
-    std::int32_t quantity{0};
-};
 
 
 class VWAPImbalanceStrategy {
 public:
-    explicit VWAPImbalanceStrategy(const StrategyConfig config = {}) noexcept
+    VWAPImbalanceStrategy(const StrategyConfig config = {}) noexcept
         : config_(config) {}
 
+    // Signals on top-of-book depth imbalance: (bid_qty - ask_qty) / total_qty in bps.
     [[nodiscard]] StrategyDecision evaluate(const FixedL2Book& book) noexcept {
-        const auto& bids = book.bids();
-        const auto& asks = book.asks();
-
-        double total_bid_vol = 0.0;
-        double bid_price_vol = 0.0;
-        for (const auto& level : bids) {
-            if (level.quantity > 0) {
-                total_bid_vol += level.quantity;
-                bid_price_vol += static_cast<double>(level.price_ticks) * level.quantity;
-            }
-        }
-
-        double total_ask_vol = 0.0;
-        double ask_price_vol = 0.0;
-        for (const auto& level : asks) {
-            if (level.quantity > 0) {
-                total_ask_vol += level.quantity;
-                ask_price_vol += static_cast<double>(level.price_ticks) * level.quantity;
-            }
-        }
-
-        if (total_bid_vol == 0.0 || total_ask_vol == 0.0) {
-            return StrategyDecision{Signal::hold, 0, 0, 0};
-        }
-
-        double vwap_bid = bid_price_vol / total_bid_vol;
-        double vwap_ask = ask_price_vol / total_ask_vol;
-
         StrategyDecision decision{};
-        decision.quantity = config_.order_quantity;
 
-        if (vwap_bid > vwap_ask * 1.001) {
-            decision.signal = Signal::buy;
-            decision.limit_price_ticks = asks[0].price_ticks;
-        } else if (vwap_ask > vwap_bid * 1.001) {
-            decision.signal = Signal::sell;
-            decision.limit_price_ticks = bids[0].price_ticks;
-        } else {
-            decision.signal = Signal::hold;
+        if (!book.has_complete_visible_depth()) {
+            return decision;
         }
 
+        const auto bid_qty = static_cast<std::int64_t>(book.total_bid_quantity());
+        const auto ask_qty = static_cast<std::int64_t>(book.total_ask_quantity());
+        const std::int64_t total = bid_qty + ask_qty;
+
+        decision.imbalance_bps = ((bid_qty - ask_qty) * 10000) / total;
+
+        if (decision.imbalance_bps >= config_.imbalance_threshold_bps) {
+            decision.signal = Signal::buy;
+            decision.limit_price_ticks = *book.best_ask();
+        } else if (decision.imbalance_bps <= -config_.imbalance_threshold_bps) {
+            decision.signal = Signal::sell;
+            decision.limit_price_ticks = *book.best_bid();
+        }
+
+        decision.quantity = config_.order_quantity;
         return decision;
     }
 

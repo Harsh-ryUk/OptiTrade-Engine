@@ -61,6 +61,13 @@ public:
         return true;
     }
 
+    // Give back the exposure of an order that is being cancelled or replaced.
+    void release(const OrderRequest& order) noexcept {
+        position_ += order.side == Side::buy
+            ? -static_cast<std::int64_t>(order.quantity)
+            : static_cast<std::int64_t>(order.quantity);
+    }
+
     void set_kill_switch(const bool enabled) noexcept {
         kill_switch_ = enabled;
     }

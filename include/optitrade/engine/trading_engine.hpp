@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 
@@ -59,7 +60,7 @@ public:
 
     [[nodiscard]] EngineResult on_market_update(
         const MarketUpdate& update) noexcept {
-        if (!sequence_tracker_.check_and_update(update.symbol_id, update.sequence_number)) {
+        if (!sequence_tracker_.check_and_update(update.sequence_number)) {
             return {
                 EngineStatus::gap_detected,
                 Signal::hold,
@@ -87,14 +88,6 @@ public:
             };
         }
 
-        if (outbox_.full()) {
-            return {
-                EngineStatus::outbox_full,
-                decision.signal,
-                decision.imbalance_bps,
-            };
-        }
-
         OrderRequest order{};
         order.client_order_id = next_client_order_id_;
         order.price_ticks = decision.limit_price_ticks;
@@ -105,43 +98,43 @@ public:
             decision.signal == Signal::buy ? Side::buy : Side::sell;
         order.order_kind = OrderKind::limit;
         order.flags = 0;
+        order.message_type = MessageType::new_order;
 
-        auto* recent_opt = pending_orders_[index].find_recent_active_order(update.sequence_number);
+        auto* recent = pending_orders_[index].find_recent_active_order(update.sequence_number);
         bool needs_cancel = false;
-        OrderRequest cancel_order{};
 
-        if (recent_opt) {
-            const auto& recent = recent_opt->request;
-            if (recent.side != order.side) {
-                cancel_order = recent;
-                cancel_order.message_type = MessageType::cancel;
+        if (recent) {
+            if (recent->request.side != order.side) {
                 needs_cancel = true;
-                order.message_type = MessageType::new_order;
-                
-                // Cancel from OrderBook
-                active_orders_book_[index].cancel_order(recent_opt->book_order);
-                pending_orders_[index].remove_order(recent.client_order_id);
-            } else if (recent.price_ticks != order.price_ticks) {
+            } else if (recent->request.price_ticks != order.price_ticks) {
                 order.message_type = MessageType::replace;
-                
-                // Cancel from OrderBook
-                active_orders_book_[index].cancel_order(recent_opt->book_order);
-                pending_orders_[index].remove_order(recent.client_order_id);
-            } else {
-                order.message_type = MessageType::new_order;
             }
-        } else {
-            order.message_type = MessageType::new_order;
         }
 
-        if (needs_cancel) {
-            if (!risks_[index].validate_and_commit(cancel_order) || !outbox_.push(cancel_order)) {
-                return {
-                    EngineStatus::outbox_full,
-                    decision.signal,
-                    decision.imbalance_bps,
-                };
+        // A cancel + new order pair needs two slots; check before mutating any state.
+        if (outbox_.size() + (needs_cancel ? 2U : 1U) > OutboxCapacity) {
+            return {
+                EngineStatus::outbox_full,
+                decision.signal,
+                decision.imbalance_bps,
+            };
+        }
+
+        const bool superseding = recent != nullptr &&
+            (needs_cancel || order.message_type == MessageType::replace);
+
+        if (superseding) {
+            const OrderRequest old_order = recent->request;
+
+            if (needs_cancel) {
+                OrderRequest cancel_order = old_order;
+                cancel_order.message_type = MessageType::cancel;
+                (void)outbox_.push(cancel_order);
             }
+
+            active_orders_book_[index].cancel_order(recent->book_order);
+            pending_orders_[index].remove_order(old_order.client_order_id);
+            risks_[index].release(old_order);
         }
 
         if (!risks_[index].validate_and_commit(order)) {
@@ -152,22 +145,16 @@ public:
             };
         }
 
-        if (!outbox_.push(order)) {
-            return {
-                EngineStatus::outbox_full,
-                decision.signal,
-                decision.imbalance_bps,
-            };
-        }
+        (void)outbox_.push(order);
 
-        // Add to OrderBook
         Order* new_book_order = active_orders_book_[index].add_order(
-            order.client_order_id, 
-            order.side, 
-            order.price_ticks, 
+            order.client_order_id,
+            order.side,
+            order.price_ticks,
             order.quantity
         );
-        pending_orders_[index].add_order(order, new_book_order);
+        active_orders_book_[index].cancel_order(
+            pending_orders_[index].add_order(order, new_book_order));
 
         ++next_client_order_id_;
 
@@ -204,7 +191,7 @@ private:
     std::array<ActiveStrategy, 16> strategies_{};
     std::array<RiskGuard, 16> risks_{};
     std::array<PendingOrderTracker, 16> pending_orders_{};
-    std::array<OrderBook<1000, 1024>, 16> active_orders_book_{};
+    std::array<OrderBook<256, 128>, 16> active_orders_book_{};
     PreallocatedOutbox<OutboxCapacity> outbox_{};
     SequenceTracker sequence_tracker_{};
     std::uint64_t next_client_order_id_{1};

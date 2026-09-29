@@ -26,12 +26,12 @@ optitrade::wire::MarketDataMessage make_message(
     const std::uint16_t level,
     const std::int64_t price_ticks,
     const std::uint32_t quantity,
-    [[maybe_unused]] const std::uint32_t symbol_id = 77) noexcept {
+    const std::uint32_t symbol_id = 0) noexcept {
     optitrade::wire::MarketDataMessage message{};
     message.sequence_number = sequence_number;
     message.exchange_timestamp_ns =
         static_cast<std::uint64_t>(sequence_number) * 1000ULL;
-    message.symbol_id = sequence_number % 4;
+    message.symbol_id = symbol_id;
     message.price_ticks = price_ticks;
     message.quantity = quantity;
     message.side = side;
@@ -171,15 +171,15 @@ int main() {
     {
         optitrade::TradingEngine<64> engine(make_config());
 
+        // Level beyond the visible depth is rejected by the book.
         const auto result = apply_message(
             engine,
             make_message(
                 400,
                 optitrade::wire::Side::buy,
-                0,
+                optitrade::kVisibleDepth,
                 100000,
-                10,
-                99));
+                10));
 
         assert(result.status == optitrade::EngineStatus::invalid_update);
     }

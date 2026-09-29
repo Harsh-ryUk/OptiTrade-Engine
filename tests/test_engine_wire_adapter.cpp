@@ -18,7 +18,7 @@ optitrade::wire::MarketDataMessage make_market_message(
     optitrade::wire::MarketDataMessage message{};
     message.sequence_number = sequence;
     message.exchange_timestamp_ns = sequence * 1000ULL;
-    message.symbol_id = sequence % 4;
+    message.symbol_id = 0;
     message.price_ticks = price_ticks;
     message.quantity = quantity;
     message.side = side;

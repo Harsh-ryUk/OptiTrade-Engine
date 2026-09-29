@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <optional>
 #include <array>
+#include <cstddef>
 
 #include "optitrade/order/order_request.hpp"
 #include "optitrade/common/types.hpp"
@@ -21,12 +22,16 @@ class PendingOrderTracker {
 public:
     PendingOrderTracker() = default;
 
-    void add_order(const OrderRequest& order, Order* book_order) noexcept {
+    // Returns the book order of a still-active entry this call overwrote (else nullptr),
+    // so the caller can free it instead of leaking it.
+    [[nodiscard]] Order* add_order(const OrderRequest& order, Order* book_order) noexcept {
         size_t idx = head_ % 64;
+        Order* evicted = buffer_[idx].active ? buffer_[idx].book_order : nullptr;
         buffer_[idx].request = order;
         buffer_[idx].book_order = book_order;
         buffer_[idx].active = true;
         head_++;
+        return evicted;
     }
 
     [[nodiscard]] TrackedRestingOrder* find_recent_active_order(uint32_t current_sequence) noexcept {
