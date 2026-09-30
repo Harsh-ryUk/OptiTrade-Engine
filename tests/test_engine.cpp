@@ -36,6 +36,12 @@ namespace {
 std::uint64_t g_allocations = 0;
 }
 
+// GCC pairs the replaced operator new with std::free() at inlined call sites and
+// warns about a "mismatch" although both replacements below use malloc/free.
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic ignored "-Wmismatched-new-delete"
+#endif
+
 void* operator new(std::size_t n) {
     ++g_allocations;
     if (void* p = std::malloc(n == 0 ? 1 : n)) return p;

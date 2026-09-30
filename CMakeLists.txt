@@ -33,6 +33,13 @@ target_link_libraries(optitrade INTERFACE Threads::Threads)
 
 function(optitrade_warnings target)
     target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic -Wshadow -Werror)
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        # GCC 12+ reports -Warray-bounds on paths it cannot prove unreachable: the
+        # decoders bounds-check every read at run time, but the tests hand them
+        # constant-size buffers of every length, including deliberately short ones.
+        # Real out-of-bounds accesses are caught by the ASan/UBSan test runs instead.
+        target_compile_options(${target} PRIVATE -Wno-array-bounds)
+    endif()
 endfunction()
 
 # ---------------------------------------------------------------------------
