@@ -308,6 +308,36 @@ OT_TEST(regimes_flip_the_sign_of_book_imbalance) {
     }
 }
 
+// At a price of a single tick the fair value walk reaches the floor constantly; every
+// generated price must still be strictly positive.
+OT_TEST(tiny_prices_never_produce_a_non_positive_price) {
+    SyntheticConfig cfg;
+    cfg.seed = 9;
+    cfg.symbols = 4;
+    cfg.start_price = 1;
+    cfg.tick = 1;
+    cfg.regime_period = 100;
+    cfg.messages = 500'000;
+
+    struct PriceCheck : itch::NullHandler {
+        using itch::NullHandler::on;
+        std::uint64_t bad{0}, seen{0};
+        void check(Price p) { ++seen; if (p <= 0) ++bad; }
+        void on(const itch::AddOrder& m) noexcept { check(m.price); }
+        void on(const itch::OrderReplace& m) noexcept { check(m.price); }
+        void on(const itch::OrderExecutedPrice& m) noexcept { check(m.price); }
+        void on(const itch::Trade& m) noexcept { check(m.price); }
+    } h;
+
+    SyntheticMarket market(cfg);
+    std::array<std::byte, 64> buf{};
+    std::size_t len = 0;
+    Nanos ts = 0;
+    while (market.next(buf, len, ts)) itch::decode(std::span<const std::byte>(buf.data(), len), h);
+    OT_CHECK(h.seen > 100'000);
+    OT_CHECK_EQ(h.bad, std::uint64_t{0});
+}
+
 OT_TEST(timestamps_saturate_at_48_bits) {
     SyntheticConfig cfg;
     cfg.messages = 100'000;

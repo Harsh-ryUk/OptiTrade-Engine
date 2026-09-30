@@ -17,9 +17,12 @@ namespace optitrade {
 // hot part of the pool cache resident and makes the handle sequence reproducible.
 //
 // Allocated nodes carry a sentinel in their `next` field, so release() can tell a
-// live handle from a free or bogus one. A repeated or out-of-range release is a
-// no-op instead of a corrupted free list (a cycle would hand the same node to two
-// owners). operator[] stays unchecked on the hot path apart from a debug assert.
+// live handle from a free or bogus one. Releasing a handle twice in a row, or an
+// out-of-range one, is a no-op instead of a corrupted free list (a cycle would hand
+// the same node to two owners). Handles carry no generation: a stale handle released
+// after its node was handed out again frees the new owner's node, so callers must
+// drop a handle when they release it. operator[] stays unchecked on the hot path
+// apart from a debug assert.
 template <class T>
 class SlabPool {
 public:
