@@ -24,6 +24,14 @@ using risk::RiskEngine;
 
 __extension__ typedef __int128 I128;
 
+#if defined(__clang__)
+// The reference model multiplies signed 128-bit values, which UBSan lowers to
+// __muloti4; libgcc does not provide it, so the link fails on Linux. The model is
+// checked for overflow by construction (values stay far below 2^127), so the
+// instrumentation is switched off for this file's own functions.
+#pragma clang attribute push(__attribute__((no_sanitize("signed-integer-overflow"))), apply_to = function)
+#endif
+
 namespace {
 
 constexpr Nanos kSec = 1'000'000'000;
@@ -1316,5 +1324,9 @@ OT_TEST(random_fills_with_rounding_match_reference_and_dropped_remainders) {
     OT_CHECK(inexact > 2'000);  // truncation happens all the time here
     OT_CHECK(flips > 200);
 }
+
+#if defined(__clang__)
+#pragma clang attribute pop
+#endif
 
 OT_TEST_MAIN()

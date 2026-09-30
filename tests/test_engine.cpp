@@ -28,6 +28,16 @@
 
 using namespace optitrade;
 
+// Sanitizer runtimes bring their own allocator; replacing operator new next to them
+// fails to link, so the allocation check only runs in plain builds.
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+#define OT_UNDER_SANITIZER 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+#define OT_UNDER_SANITIZER 1
+#endif
+#endif
+
 // ---- allocation counter ------------------------------------------------------------------------
 // Replaces global operator new so a test can assert that a stretch of code allocates nothing. It is
 // only ever read inside a measured window; everything else pays one relaxed increment.
@@ -42,6 +52,7 @@ std::uint64_t g_allocations = 0;
 #pragma GCC diagnostic ignored "-Wmismatched-new-delete"
 #endif
 
+#ifndef OT_UNDER_SANITIZER
 void* operator new(std::size_t n) {
     ++g_allocations;
     if (void* p = std::malloc(n == 0 ? 1 : n)) return p;
@@ -52,6 +63,7 @@ void operator delete(void* p) noexcept { std::free(p); }
 void operator delete[](void* p) noexcept { std::free(p); }
 void operator delete(void* p, std::size_t) noexcept { std::free(p); }
 void operator delete[](void* p, std::size_t) noexcept { std::free(p); }
+#endif
 
 namespace {
 
@@ -741,7 +753,11 @@ OT_TEST(message_path_does_not_allocate) {
     l.eng.on_feed_gap(now += 10);
     const std::uint64_t allocs = g_allocations - before;
 
+#ifndef OT_UNDER_SANITIZER
     OT_CHECK_EQ(allocs, std::uint64_t{0});
+#else
+    (void)allocs;
+#endif
     OT_CHECK(l.eng.strategy().calls > 100);   // the loop really exercised the strategy path
     OT_CHECK(l.eng.orders().orders_submitted() >= 20);
     OT_CHECK(l.eng.strategy().fills > 0);
