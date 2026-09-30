@@ -38,7 +38,7 @@
 // digest made the same decisions and received the same answers, byte for byte; the
 // determinism test freezes these values across compilers and platforms.
 //
-// Choices the contract leaves open
+// Choices the specification leaves open
 //   * Time never runs backwards. A record stamped earlier than its predecessor (corrupt or
 //     concatenated files) is processed at the predecessor's time. The simulator requires
 //     non-decreasing send times, and a strategy must never see the clock step back.
@@ -51,7 +51,7 @@
 //     without a valid mid keeps its last mark from the engine.
 //   * PnL and drawdown are in price units (1e-4 currency), as in the risk engine.
 //   * `volume` is the sum of executed shares in the reports delivered to the engine.
-//   * `dropped_reports` is an addition to the contract's field list. It stays 0 unless the
+//   * `dropped_reports` is an addition to the documented report fields. It stays 0 unless the
 //     simulator's report ring overflowed, in which case the run is not trustworthy.
 //
 // Sizing. Nothing is allocated per message, but the engine and the simulator each build

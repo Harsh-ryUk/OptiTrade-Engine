@@ -420,7 +420,7 @@ void property_run(int seed, std::size_t cap, Price range, int steps) {
                 if (gen != 0) resting.push_back({side, price, q, id, gen});
                 break;
             }
-            case 2: {  // contract add
+            case 2: {  // add
                 const Qty q = static_cast<Qty>(rng.bounded(30));
                 OT_CHECK_EQ(b.add(side, price, q), ms.add(price, q, gens) != 0);
                 break;

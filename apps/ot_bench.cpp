@@ -65,10 +65,10 @@
 //   counter behind steady_clock ticks at 24 MHz, i.e. steps of ~41.7 ns, which quantises
 //   every per-call sample to that grid.
 //
-// Results cannot be optimised away: the engine escapes into an empty asm statement with a
-// memory clobber around every call, statuses are folded into a checksum that is printed,
-// and the engine counters are compared across passes (identical input must give identical
-// counters; a difference is reported as an error).
+// Results cannot be optimised away: the engine is heap state mutated by every call, each
+// call's status is passed through an opaque sink (an empty asm statement with a memory
+// clobber), and the engine counters are compared across passes (identical input must give
+// identical counters; a difference is reported as an error).
 //
 // Output: an environment banner, a percentile table, and with --csv FILE a machine-readable
 // file (header: strategy,pass,metric,count,mean_ns,p50_ns,p90_ns,p99_ns,p999_ns,p9999_ns,
@@ -936,9 +936,12 @@ int run_strategy(const Options& o, const Feed& feed, const Timer& timer, std::FI
                     static_cast<unsigned long long>(late_starts), n,
                     100.0 * static_cast<double>(late_starts) / static_cast<double>(n), timer.to_ns(max_lag),
                     timer.to_ns(end_lag));
-        if (util >= 1.0 || timer.to_ns(end_lag) > 10.0 * period_ns) {
+        if (util >= 1.0) {
             std::printf("  WARNING: offered rate is at or above capacity; response times grow with the backlog and\n"
                         "           describe overload, not steady-state latency. Lower --rate.\n");
+        } else if (timer.to_ns(end_lag) > 10.0 * period_ns) {
+            std::printf("  NOTE: the engine keeps up on average (utilisation below 1) but a backlog built up: the\n"
+                        "        thread was descheduled or the host is busy. Pin the thread (--cpu) on a quiet machine.\n");
         }
     }
     print_counters("orders in measured region:", measured_delta);

@@ -38,7 +38,7 @@
 // happens at start-up. Virtual calls on the path are exactly those a strategy makes
 // (OrderApi) plus the OrderManager's callbacks to the listener and the gateway.
 //
-// Semantics that the contract leaves open, and how they were resolved
+// Semantics that the specification leaves open, and how they were resolved
 //   * Which locate a message belongs to. Executions, cancels, deletes and replaces name only
 //     an order reference; the books act on the stored order and ignore the header locate.
 //     The engine does the same: the strategy is told about the instrument whose book actually

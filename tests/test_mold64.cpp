@@ -818,7 +818,7 @@ OT_TEST(tracker_matches_reference_model_on_random_streams) {
     Rng rng(0x5EEDF00D);
     for (int stream = 0; stream < 200; ++stream) {
         SequenceTracker t;
-        // Reference model kept as (last_seq, last_advance) exactly as the contract words it:
+        // Reference model kept as (last_seq, last_advance) exactly as the MoldUDP64 sequencing rules word it:
         // expected = last sequence + last count. All values stay far below 2^62, so signed
         // 64-bit differences are exact and independent of unsigned comparison tricks.
         bool have = false;

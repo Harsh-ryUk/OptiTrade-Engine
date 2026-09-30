@@ -126,7 +126,7 @@ inline constexpr std::uint32_t kTifSystemHours = 99999;
 // ---------------------------------------------------------------------------
 
 // Buy/sell indicator: 'B', 'S', 'T' (sell short) and 'E' (sell short exempt) map
-// to `side` plus `short_sell`. The contract carries a single flag, so 'E' is read
+// to `side` plus `short_sell`. The message model carries a single flag, so 'E' is read
 // as a short sale and written back as 'T'; the exemption cannot be expressed.
 // `short_sell` is ignored on a buy.
 struct EnterOrder {
