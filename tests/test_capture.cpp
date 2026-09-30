@@ -2,9 +2,14 @@
 // Expected file contents are written out byte by byte from the format description
 // in replay/capture.hpp rather than produced by the writer under test.
 
+#include <dirent.h>
+#include <fcntl.h>
+#include <sys/resource.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <array>
+#include <csignal>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -83,6 +88,83 @@ Bytes rec(std::uint64_t ts, const Bytes& payload) {
 }
 
 std::span<const std::byte> view(const Bytes& b) { return {b.data(), b.size()}; }
+
+void skip(const char* test, const char* why) { std::printf("[skip] %s: %s\n", test, why); }
+
+// Number of open descriptors of this process, or -1 if the host offers no listing. The directory
+// stream's own descriptor is open during the scan, which cancels out when two counts are compared.
+int open_fd_count() {
+    for (const char* dir : {"/proc/self/fd", "/dev/fd"}) {
+        DIR* d = ::opendir(dir);
+        if (d == nullptr) continue;
+        int n = 0;
+        while (::readdir(d) != nullptr) ++n;
+        ::closedir(d);
+        return n;
+    }
+    return -1;
+}
+
+// Makes the next refill of an already-open reader's stdio buffer fail with a real read(2)
+// error (EISDIR): finds the descriptor behind `path` and points it at a directory. Returns false
+// if the descriptor cannot be found or replaced. Data already buffered is still delivered.
+bool break_reads_of(const char* path) {
+    struct stat want {};
+    if (::stat(path, &want) != 0) return false;
+    const int dir = ::open("/", O_RDONLY);
+    if (dir < 0) return false;
+    bool done = false;
+    for (int fd = 3; fd < 256 && !done; ++fd) {
+        struct stat st {};
+        if (fd != dir && ::fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_ino == want.st_ino && st.st_dev == want.st_dev) {
+            done = ::dup2(dir, fd) == fd;
+        }
+    }
+    ::close(dir);
+    return done;
+}
+
+// Lowers the file size limit for its lifetime so that writes past `bytes` fail (EFBIG), the same
+// way a full disk would; SIGXFSZ is ignored so the failure shows up as an error return.
+class FileSizeLimit {
+public:
+    explicit FileSizeLimit(rlim_t bytes) {
+        if (::getrlimit(RLIMIT_FSIZE, &old_) != 0) return;
+        struct sigaction ign {};
+        ign.sa_handler = SIG_IGN;
+        sigemptyset(&ign.sa_mask);
+        if (::sigaction(SIGXFSZ, &ign, &old_sa_) != 0) return;
+        rlimit now = old_;
+        now.rlim_cur = bytes;
+        active_ = ::setrlimit(RLIMIT_FSIZE, &now) == 0;
+        if (!active_) (void)::sigaction(SIGXFSZ, &old_sa_, nullptr);
+    }
+    ~FileSizeLimit() {
+        if (!active_) return;
+        (void)::setrlimit(RLIMIT_FSIZE, &old_);
+        (void)::sigaction(SIGXFSZ, &old_sa_, nullptr);
+    }
+    FileSizeLimit(const FileSizeLimit&) = delete;
+    FileSizeLimit& operator=(const FileSizeLimit&) = delete;
+    bool active() const { return active_; }
+
+private:
+    rlimit old_{};
+    struct sigaction old_sa_ {};
+    bool active_{false};
+};
+
+// True if the host enforces the limit set by FileSizeLimit on a plain stdio stream (some
+// sandboxes do not), so a test can skip instead of reporting a bug that is not there.
+bool limit_is_enforced(const char* path, std::size_t limit) {
+    std::FILE* f = std::fopen(path, "wb");
+    if (f == nullptr) return false;
+    const Bytes junk(limit * 4, std::byte{1});
+    (void)std::fwrite(junk.data(), 1, junk.size(), f);
+    const bool flushed = std::fflush(f) == 0;
+    std::fclose(f);
+    return !flushed;
+}
 
 bool same(std::span<const std::byte> a, const Bytes& b) {
     return a.size() == b.size() && (a.empty() || std::memcmp(a.data(), b.data(), a.size()) == 0);
@@ -254,6 +336,92 @@ OT_TEST(bad_magic_wrong_version_and_empty_or_missing_file) {
     OT_CHECK(!missing.next(x));
 }
 
+OT_TEST(missing_files_report_truncated) {
+    TempFile f;  // never created
+    CaptureReader c(f.path());
+    ItchFileReader i(f.path());
+    Record x;
+    OT_CHECK(!c.ok());
+    OT_CHECK(c.error() == DecodeStatus::truncated);
+    OT_CHECK(!c.next(x));
+    OT_CHECK_EQ(c.records_read(), std::uint64_t{0});
+    OT_CHECK(!i.ok());
+    OT_CHECK(i.error() == DecodeStatus::truncated);
+    OT_CHECK(!i.next(x));
+    OT_CHECK_EQ(i.records_read(), std::uint64_t{0});
+}
+
+OT_TEST(capture_payload_limit_is_exactly_kCaptureMaxPayload) {
+    static_assert(kCaptureMaxPayload == 4096, "the on-disk format promises this bound");
+    TempFile f;
+    const Bytes at_limit(kCaptureMaxPayload, std::byte{0x5A});
+    {
+        CaptureWriter w(f.path());
+        OT_CHECK(w.write(1, view(at_limit)));
+        OT_CHECK(!w.write(2, view(Bytes(kCaptureMaxPayload + 1, std::byte{0x5A}))));
+        OT_CHECK(w.ok());  // refusing an oversized payload is not an I/O failure
+        OT_CHECK(w.write(3, view(bytes({0x01}))));
+        OT_CHECK_EQ(w.records(), std::uint64_t{2});
+        OT_CHECK(w.close());
+    }
+    Bytes expect = kHeader;
+    append(expect, rec(1, at_limit));
+    append(expect, rec(3, bytes({0x01})));
+    OT_CHECK(f.get() == expect);
+
+    CaptureReader r(f.path());
+    Record x;
+    OT_CHECK(r.next(x));
+    OT_CHECK(same(x.payload, at_limit));
+    OT_CHECK(r.next(x));
+    OT_CHECK(!r.next(x));
+    OT_CHECK(r.error() == DecodeStatus::ok);
+}
+
+OT_TEST(a_directory_is_not_a_clean_empty_capture) {
+    // fopen(dir, "rb") succeeds on Linux and macOS; the first read(2) then fails with EISDIR.
+    const std::string dir = std::filesystem::temp_directory_path().string();
+    CaptureReader c(dir.c_str());
+    Record x;
+    OT_CHECK(!c.ok());
+    OT_CHECK(c.error() != DecodeStatus::ok);
+    OT_CHECK(!c.next(x));
+    ItchFileReader i(dir.c_str());
+    OT_CHECK(!i.next(x));
+    OT_CHECK(i.error() != DecodeStatus::ok);  // a failed read must not look like end of file
+}
+
+OT_TEST(readers_release_their_file_descriptors) {
+    const int before = open_fd_count();
+    if (before < 0) {
+        skip("readers_release_their_file_descriptors", "no /proc/self/fd or /dev/fd");
+        return;
+    }
+    TempFile good;
+    TempFile bad;
+    TempFile out;
+    {
+        Bytes file = kHeader;
+        append(file, rec(1, bytes({1, 2, 3})));
+        good.set(file);
+        Bytes junk = kHeader;
+        junk[0] = std::byte{'X'};  // header rejected: the file is open but the reader is not ok
+        bad.set(junk);
+    }
+    Record x;
+    for (int i = 0; i < 300; ++i) {  // more than the default 256-descriptor limit on macOS
+        CaptureReader c(good.path());
+        OT_CHECK(c.ok() && c.next(x));
+        CaptureReader b(bad.path());
+        OT_CHECK(!b.ok());
+        ItchFileReader t(good.path());
+        OT_CHECK(t.ok());
+        CaptureWriter w(out.path());
+        OT_CHECK(w.ok());
+    }
+    OT_CHECK_EQ(open_fd_count(), before);
+}
+
 OT_TEST(zero_length_and_oversized_payloads_are_rejected) {
     TempFile f;
     // Reader: a stored zero-length record and a length above the maximum both stop the read.
@@ -321,6 +489,58 @@ OT_TEST(writer_reports_unwritable_path) {
     OT_CHECK(!w.write(1, view(bytes({1}))));
     OT_CHECK(!w.close());
     OT_CHECK_EQ(w.records(), std::uint64_t{0});
+}
+
+OT_TEST(writer_ok_turns_false_after_close_and_writes_are_refused) {
+    TempFile f;
+    CaptureWriter w(f.path());
+    OT_CHECK(w.ok());
+    OT_CHECK(w.write(1, view(bytes({1}))));
+    OT_CHECK(w.close());
+    OT_CHECK(!w.ok());  // the file is gone, nothing more can be written
+    OT_CHECK(!w.write(2, view(bytes({2}))));
+    OT_CHECK_EQ(w.records(), std::uint64_t{1});
+    OT_CHECK(w.close());  // still reports the first close's success
+}
+
+OT_TEST(close_reports_a_failure_that_only_surfaces_when_flushing) {
+    TempFile f;
+    if (!FileSizeLimit(1).active()) {
+        skip("close_reports_a_failure_that_only_surfaces_when_flushing", "setrlimit(RLIMIT_FSIZE) unavailable");
+        return;
+    }
+    constexpr std::size_t kLimit = 1000;
+    {
+        FileSizeLimit limit(kLimit);
+        if (!limit_is_enforced(f.path(), kLimit)) {
+            skip("close_reports_a_failure_that_only_surfaces_when_flushing", "host does not enforce RLIMIT_FSIZE");
+            return;
+        }
+        // 200 records of 50 bytes sit in the 64 KiB stdio buffer, so every write() succeeds
+        // and the out-of-space error first shows up when close() flushes.
+        CaptureWriter w(f.path());
+        OT_CHECK(w.ok());
+        std::uint64_t accepted = 0;
+        for (std::uint64_t i = 0; i < 200; ++i) accepted += w.write(i, view(Bytes(40, std::byte{1}))) ? 1 : 0;
+        OT_CHECK_EQ(accepted, std::uint64_t{200});
+        OT_CHECK(w.ok());
+        OT_CHECK(!w.close());  // the data did not reach the file: must not claim success
+        OT_CHECK(!w.ok());
+        OT_CHECK(!w.close());  // and the verdict is stable
+    }
+    // The same failure hit mid-stream: a write() that overflows the buffer fails and sticks.
+    {
+        FileSizeLimit limit(kLimit);
+        CaptureWriter w(f.path());
+        OT_CHECK(w.ok());
+        const Bytes big(kCaptureMaxPayload, std::byte{2});
+        bool failed = false;
+        for (int i = 0; i < 40 && !failed; ++i) failed = !w.write(static_cast<Nanos>(i), view(big));
+        OT_CHECK(failed);
+        OT_CHECK(!w.ok());
+        OT_CHECK(!w.write(99, view(bytes({1}))));
+        OT_CHECK(!w.close());
+    }
 }
 
 namespace {
@@ -404,6 +624,78 @@ OT_TEST(itch_file_reader_returns_every_frame_with_header_timestamps) {
     OT_CHECK(!r.next(x));
     OT_CHECK(r.error() == DecodeStatus::ok);
     OT_CHECK_EQ(r.records_read(), std::uint64_t{4});
+}
+
+OT_TEST(itch_file_reader_timestamp_needs_a_full_eleven_byte_header) {
+    // The timestamp occupies bytes 5..10, so it takes 11 bytes to hold it: a 10-byte frame has
+    // no complete timestamp and must inherit the previous one rather than read past its end.
+    TempFile f;
+    const auto stamp = [](std::uint64_t ts, std::size_t len) {
+        Bytes m(len, std::byte{0xFF});  // 0xFF filler: a misplaced read shows up in the value
+        for (int i = 0; i < 6; ++i) m[5 + static_cast<std::size_t>(i)] = static_cast<std::byte>(ts >> (8 * (5 - i)));
+        return m;
+    };
+    Bytes file;
+    append(file, framed(Bytes(10, std::byte{0xFF})));  // first frame, too short: time stays 0
+    append(file, framed(stamp(0x1122'3344'5566ULL, 11)));  // exactly long enough
+    append(file, framed(Bytes(10, std::byte{0xFF})));  // inherits 0x112233445566
+    append(file, framed(stamp(0x0000'0000'0042ULL, 11)));
+    append(file, framed(Bytes(1, std::byte{'Z'})));    // 1 byte: same rule
+    append(file, framed(stamp(0x0000'0000'0043ULL, 12)));
+    f.set(file);
+
+    ItchFileReader r(f.path());
+    Record x;
+    const std::pair<std::size_t, std::uint64_t> want[] = {{10, 0}, {11, 0x1122'3344'5566ULL}, {10, 0x1122'3344'5566ULL},
+                                                        {11, 0x42},  {1, 0x42},                  {12, 0x43}};
+    for (const auto& [len, ts] : want) {
+        OT_CHECK(r.next(x));
+        OT_CHECK_EQ(x.payload.size(), len);
+        OT_CHECK_EQ(x.ts, ts);
+    }
+    OT_CHECK(!r.next(x));
+    OT_CHECK(r.error() == DecodeStatus::ok);
+    OT_CHECK_EQ(r.records_read(), std::uint64_t{6});
+}
+
+OT_TEST(read_error_at_a_record_boundary_is_not_a_clean_end) {
+    // The stdio buffer is 64 KiB, so a file whose first 65536 bytes end exactly on a record
+    // boundary makes the failing refill land where the readers decide between "clean end" and
+    // "damage" (fread returns 0 in both cases; only feof tells them apart).
+    TempFile f;
+    {
+        Bytes file = kHeader;  // 16 + 1365 * (10 + 38) = 65536
+        for (int k = 0; k < 1365 + 50; ++k) append(file, rec(static_cast<std::uint64_t>(k), Bytes(38, std::byte{3})));
+        f.set(file);
+        CaptureReader r(f.path());
+        Record x;
+        OT_CHECK(r.ok());
+        if (!break_reads_of(f.path())) {
+            skip("read_error_at_a_record_boundary_is_not_a_clean_end", "cannot find the reader's descriptor");
+            return;
+        }
+        std::uint64_t got = 0;
+        while (r.next(x)) ++got;
+        OT_CHECK(got <= 1365);  // only what was already buffered
+        OT_CHECK(r.error() != DecodeStatus::ok);
+        OT_CHECK(!r.next(x));
+    }
+    {
+        Bytes file;  // 2048 * (2 + 30) = 65536
+        for (int k = 0; k < 2048 + 50; ++k) append(file, framed(Bytes(30, std::byte{3})));
+        f.set(file);
+        ItchFileReader r(f.path());
+        Record x;
+        OT_CHECK(r.next(x));  // forces the first buffer fill; 2047 frames are still buffered
+        if (!break_reads_of(f.path())) {
+            skip("read_error_at_a_record_boundary_is_not_a_clean_end", "cannot find the reader's descriptor");
+            return;
+        }
+        std::uint64_t got = 1;
+        while (r.next(x)) ++got;
+        OT_CHECK(got <= 2048);
+        OT_CHECK(r.error() != DecodeStatus::ok);
+    }
 }
 
 OT_TEST(itch_file_reader_handles_largest_frame_empty_and_truncated_files) {

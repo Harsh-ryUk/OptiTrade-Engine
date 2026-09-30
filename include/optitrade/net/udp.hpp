@@ -44,6 +44,25 @@ inline bool is_multicast(const in_addr& a) noexcept {
 
 inline bool is_blank(const char* s) noexcept { return s == nullptr || *s == '\0'; }
 
+// A datagram socket that is not inherited by exec'd children: a leaked descriptor would keep the
+// port bound (and the multicast membership alive) inside a forked helper process. SOCK_CLOEXEC
+// sets the flag atomically with creation where it exists (Linux); elsewhere (macOS) fcntl right
+// after socket() is the best available, leaving only a window against a concurrent fork+exec.
+inline int open_dgram() noexcept {
+#ifdef SOCK_CLOEXEC
+    return ::socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+#else
+    const int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd >= 0 && ::fcntl(fd, F_SETFD, FD_CLOEXEC) != 0) {
+        const int saved = errno;
+        (void)::close(fd);
+        errno = saved;
+        return -1;
+    }
+    return fd;
+#endif
+}
+
 // poll(2) counts in milliseconds. Round a positive microsecond timeout up so that a caller
 // asking for 100 us waits 1 ms rather than degenerating into a busy return; negative means
 // wait forever. (timeout_us == 0 never reaches poll: it is handled as a plain non-blocking read.)
@@ -84,7 +103,7 @@ public:
         } else if (!detail::make_addr(bind_ip, port, addr)) {
             return UdpSocket{};
         }
-        UdpSocket s{::socket(AF_INET, SOCK_DGRAM, 0)};
+        UdpSocket s{detail::open_dgram()};
         if (!s.valid()) return UdpSocket{};
 
         // Several feed handlers on one host may subscribe to the same multicast group and
@@ -107,7 +126,7 @@ public:
     }
 
     // Unbound socket for sending; the kernel assigns a source port on first use.
-    static UdpSocket sender() noexcept { return UdpSocket{::socket(AF_INET, SOCK_DGRAM, 0)}; }
+    static UdpSocket sender() noexcept { return UdpSocket{detail::open_dgram()}; }
 
     bool valid() const noexcept { return fd_ >= 0; }
     // Underlying descriptor for poll/epoll integration; -1 when invalid. Ownership stays here.
@@ -148,6 +167,39 @@ public:
             mreq.imr_interface = iface.sin_addr;
         }
         return ::setsockopt(fd_, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof mreq) == 0;
+    }
+
+    // Egress interface for multicast datagrams sent from this socket (IP_MULTICAST_IF), named by
+    // one of its IPv4 addresses. Null or empty restores the kernel's routing-table choice.
+    // Without this, a host with several interfaces may send group traffic out of the wrong one.
+    bool set_multicast_interface(const char* interface_ip) noexcept {
+        if (fd_ < 0) return false;
+        in_addr ia{};
+        if (detail::is_blank(interface_ip)) {
+            ia.s_addr = htonl(INADDR_ANY);
+        } else {
+            sockaddr_in a{};
+            if (!detail::make_addr(interface_ip, 0, a)) return false;
+            ia = a.sin_addr;
+        }
+        return ::setsockopt(fd_, IPPROTO_IP, IP_MULTICAST_IF, &ia, sizeof ia) == 0;
+    }
+
+    // Whether multicast datagrams sent from this socket are also delivered to receivers on the
+    // same host (IP_MULTICAST_LOOP, on by default). The option is a single byte on both Linux and
+    // the BSDs, so it is passed as one.
+    bool set_multicast_loop(bool on) noexcept {
+        if (fd_ < 0) return false;
+        const unsigned char v = on ? 1 : 0;
+        return ::setsockopt(fd_, IPPROTO_IP, IP_MULTICAST_LOOP, &v, sizeof v) == 0;
+    }
+
+    // Hop limit for multicast datagrams sent from this socket (IP_MULTICAST_TTL); the default of 1
+    // keeps them on the local subnet. Valid range 0..255, anything else is refused.
+    bool set_multicast_ttl(int ttl) noexcept {
+        if (fd_ < 0 || ttl < 0 || ttl > 255) return false;
+        const unsigned char v = static_cast<unsigned char>(ttl);
+        return ::setsockopt(fd_, IPPROTO_IP, IP_MULTICAST_TTL, &v, sizeof v) == 0;
     }
 
     // In nonblocking mode recv() never waits (its timeout is ignored), which lets a busy-poll

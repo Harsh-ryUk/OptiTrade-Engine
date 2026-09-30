@@ -1,18 +1,24 @@
 // UdpSocket over the loopback interface. Every receiver binds an ephemeral port (no fixed
-// ports, so parallel test runs cannot collide) and nothing here needs multicast support,
-// which sandboxes and containers often lack.
+// ports, so parallel test runs cannot collide). The multicast round trip needs a host that
+// lets a socket join a group on the loopback interface; sandboxes and containers often do not,
+// so that one test probes the host first and prints a skip reason instead of failing.
 
 #include <array>
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <utility>
 #include <vector>
 
+#include <arpa/inet.h>
 #include <csignal>
 #include <fcntl.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 #include <sys/time.h>
+#include <unistd.h>
 
 #include "check.hpp"
 #include "optitrade/net/mold64.hpp"
@@ -39,6 +45,33 @@ long elapsed_ms(Clock::time_point since) {
 }
 
 bool fd_is_open(int fd) { return ::fcntl(fd, F_GETFD) != -1; }
+
+void skip(const char* test, const char* why) { std::printf("[skip] %s: %s\n", test, why); }
+
+// Asks the host directly (plain syscalls, not UdpSocket) whether joining `group` on `iface` is
+// possible, so a bug in join_multicast can never be mistaken for a host without multicast.
+bool host_can_join(const char* group, const char* iface) {
+    const int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) return false;
+    ip_mreq m{};
+    const bool parsed = inet_pton(AF_INET, group, &m.imr_multiaddr) == 1 && inet_pton(AF_INET, iface, &m.imr_interface) == 1;
+    const bool ok = parsed && ::setsockopt(fd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &m, sizeof m) == 0;
+    (void)::close(fd);
+    return ok;
+}
+
+template <class T>
+T get_ip_opt(const UdpSocket& s, int name) {
+    T v{};
+    socklen_t len = sizeof v;
+    if (::getsockopt(s.native_handle(), IPPROTO_IP, name, &v, &len) != 0) return T{};
+    return v;
+}
+
+bool cloexec(const UdpSocket& s) {
+    const int flags = ::fcntl(s.native_handle(), F_GETFD);
+    return flags >= 0 && (flags & FD_CLOEXEC) != 0;
+}
 
 }  // namespace
 
@@ -359,10 +392,113 @@ OT_TEST(multicast_join_rejects_bad_arguments) {
     OT_CHECK(!rx.join_multicast("240.0.0.1", nullptr));         // just above 239.255.255.255
     OT_CHECK(!rx.join_multicast("239.1.2.3", "not-an-ip"));     // bad interface address
 
-    // A real join depends on the host (no multicast in many sandboxes), so only make sure
-    // that the call is safe; the result is deliberately not asserted.
-    (void)rx.join_multicast("239.255.42.99", kLoopback);
     OT_CHECK(rx.valid());
+}
+
+OT_TEST(multicast_join_and_round_trip_on_loopback) {
+    const char* group = "239.255.42.99";
+    // The upper end of the group range: a mask narrower than 224.0.0.0/4 would refuse it up front.
+    const char* edge = "239.255.255.250";
+    if (!host_can_join(group, kLoopback) || !host_can_join(edge, kLoopback)) {
+        skip("multicast_join_and_round_trip_on_loopback", "host refuses IP_ADD_MEMBERSHIP on 127.0.0.1");
+        return;
+    }
+    UdpSocket rx = UdpSocket::receiver(nullptr, 0);
+    OT_CHECK(rx.valid());
+    OT_CHECK(rx.join_multicast(group, kLoopback));
+    OT_CHECK(rx.join_multicast(edge, kLoopback));
+
+    UdpSocket tx = UdpSocket::sender();
+    OT_CHECK(tx.set_multicast_interface(kLoopback));
+    OT_CHECK(tx.set_multicast_loop(true));
+    OT_CHECK(tx.set_multicast_ttl(1));
+    const Bytes msg = pattern(37, 11);
+    errno = 0;
+    if (!tx.send_to(group, rx.local_port(), view(msg))) {
+        const int e = errno;
+        if (e == ENETUNREACH || e == EHOSTUNREACH || e == ENODEV || e == EADDRNOTAVAIL || e == EPERM || e == EACCES) {
+            skip("multicast_join_and_round_trip_on_loopback", "host cannot route multicast out of 127.0.0.1");
+            return;
+        }
+        OT_CHECK(false);
+        return;
+    }
+    Bytes buf(2048, std::byte{0xEE});
+    const std::ptrdiff_t n = rx.recv(std::span<std::byte>(buf), kWaitUs);
+    OT_CHECK_EQ(n, std::ptrdiff_t{37});
+    OT_CHECK(n == 37 && std::memcmp(buf.data(), msg.data(), 37) == 0);
+
+    // With host-local delivery switched off the sender's own datagram must not come back.
+    OT_CHECK(tx.set_multicast_loop(false));
+    OT_CHECK(tx.send_to(group, rx.local_port(), view(msg)));
+    OT_CHECK_EQ(rx.recv(std::span<std::byte>(buf), 200'000), std::ptrdiff_t{0});
+    OT_CHECK(tx.set_multicast_loop(true));
+    OT_CHECK(tx.send_to(group, rx.local_port(), view(msg)));
+    OT_CHECK_EQ(rx.recv(std::span<std::byte>(buf), kWaitUs), std::ptrdiff_t{37});
+}
+
+OT_TEST(multicast_sender_options_are_applied) {
+    UdpSocket tx = UdpSocket::sender();
+    OT_CHECK(tx.valid());
+
+    OT_CHECK(tx.set_multicast_interface(kLoopback));
+    OT_CHECK_EQ(get_ip_opt<in_addr>(tx, IP_MULTICAST_IF).s_addr, htonl(INADDR_LOOPBACK));
+    OT_CHECK(!tx.set_multicast_interface("not-an-ip"));  // refused and the setting is untouched
+    OT_CHECK_EQ(get_ip_opt<in_addr>(tx, IP_MULTICAST_IF).s_addr, htonl(INADDR_LOOPBACK));
+    OT_CHECK(tx.set_multicast_interface(nullptr));  // back to the kernel's choice
+    OT_CHECK_EQ(get_ip_opt<in_addr>(tx, IP_MULTICAST_IF).s_addr, htonl(INADDR_ANY));
+    OT_CHECK(tx.set_multicast_interface(kLoopback));
+    OT_CHECK(tx.set_multicast_interface(""));
+    OT_CHECK_EQ(get_ip_opt<in_addr>(tx, IP_MULTICAST_IF).s_addr, htonl(INADDR_ANY));
+
+    // An address no local interface owns: the host's refusal must be reported, not swallowed.
+    // (TEST-NET-1, never routable. Whether the host refuses is asked of the kernel directly.)
+    in_addr foreign{};
+    inet_pton(AF_INET, "192.0.2.123", &foreign);
+    const bool host_refuses = ::setsockopt(UdpSocket::sender().native_handle(), IPPROTO_IP, IP_MULTICAST_IF, &foreign, sizeof foreign) != 0;
+    if (host_refuses) {
+        OT_CHECK(!tx.set_multicast_interface("192.0.2.123"));
+    } else {
+        skip("multicast_sender_options_are_applied", "host accepts a non-local IP_MULTICAST_IF address");
+    }
+
+    OT_CHECK(tx.set_multicast_ttl(7));
+    OT_CHECK_EQ(int{get_ip_opt<unsigned char>(tx, IP_MULTICAST_TTL)}, 7);
+    OT_CHECK(tx.set_multicast_ttl(255));
+    OT_CHECK_EQ(int{get_ip_opt<unsigned char>(tx, IP_MULTICAST_TTL)}, 255);
+    OT_CHECK(tx.set_multicast_ttl(0));
+    OT_CHECK_EQ(int{get_ip_opt<unsigned char>(tx, IP_MULTICAST_TTL)}, 0);
+    OT_CHECK(tx.set_multicast_ttl(9));
+    OT_CHECK(!tx.set_multicast_ttl(-1));
+    OT_CHECK(!tx.set_multicast_ttl(256));
+    OT_CHECK_EQ(int{get_ip_opt<unsigned char>(tx, IP_MULTICAST_TTL)}, 9);  // rejected values change nothing
+
+    OT_CHECK(tx.set_multicast_loop(false));
+    OT_CHECK_EQ(int{get_ip_opt<unsigned char>(tx, IP_MULTICAST_LOOP)}, 0);
+    OT_CHECK(tx.set_multicast_loop(true));
+    OT_CHECK_EQ(int{get_ip_opt<unsigned char>(tx, IP_MULTICAST_LOOP)}, 1);
+
+    UdpSocket none;
+    OT_CHECK(!none.set_multicast_interface(kLoopback));
+    OT_CHECK(!none.set_multicast_loop(true));
+    OT_CHECK(!none.set_multicast_ttl(1));
+}
+
+OT_TEST(sockets_are_close_on_exec) {
+    // Otherwise an exec'd helper would inherit the descriptor and keep the port bound.
+    UdpSocket tx = UdpSocket::sender();
+    UdpSocket rx = UdpSocket::receiver(kLoopback, 0);
+    UdpSocket any = UdpSocket::receiver(nullptr, 0, 1 << 16);
+    UdpSocket grp = UdpSocket::receiver("239.255.42.98", 0);
+    OT_CHECK(tx.valid() && rx.valid() && any.valid());
+    OT_CHECK(cloexec(tx));
+    OT_CHECK(cloexec(rx));
+    OT_CHECK(cloexec(any));
+    if (grp.valid()) OT_CHECK(cloexec(grp));
+    OT_CHECK(rx.set_nonblocking(true));  // changing file status flags must not clear it
+    OT_CHECK(cloexec(rx));
+    UdpSocket moved = std::move(rx);
+    OT_CHECK(cloexec(moved));
 }
 
 OT_TEST(multicast_group_bind_address_is_accepted) {
