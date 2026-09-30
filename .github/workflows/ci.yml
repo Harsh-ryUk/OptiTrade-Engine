@@ -1,0 +1,114 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: "Linux / gcc",     os: ubuntu-24.04, cxx: g++ }
+          - { name: "Linux / clang",   os: ubuntu-24.04, cxx: clang++ }
+          - { name: "macOS / clang",   os: macos-latest, cxx: clang++ }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update && sudo apt-get install -y ninja-build clang
+          else
+            brew install ninja
+          fi
+      - name: Configure
+        run: cmake --preset release -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}
+      - name: Build
+        run: cmake --build --preset release
+      - name: Test
+        run: ctest --preset release
+
+  sanitizers:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: "ASan + UBSan", preset: asan }
+          - { name: "ThreadSanitizer", preset: tsan }
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build clang
+      - run: cmake --preset ${{ matrix.preset }} -DCMAKE_CXX_COMPILER=clang++
+      - run: cmake --build --preset ${{ matrix.preset }}
+      - run: ctest --preset ${{ matrix.preset }}
+
+  fuzz:
+    name: libFuzzer (30 s per target)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build clang
+      - run: cmake --preset fuzz
+      - run: cmake --build --preset fuzz
+      - name: Fuzz every target
+        run: |
+          for f in build/fuzz/fuzz_*; do
+            n=$(basename "$f")
+            mkdir -p "corpus/$n"
+            "$f" -max_total_time=30 -use_value_profile=1 -artifact_prefix="crash-$n-" "corpus/$n"
+          done
+      - name: Keep crash reproducers
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes
+          path: crash-*
+
+  determinism:
+    name: Cross-compiler determinism
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build clang
+      - name: Same digests from gcc and clang
+        run: |
+          for cxx in g++ clang++; do
+            cmake -S . -B "build/$cxx" -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=$cxx
+            cmake --build "build/$cxx" --target ot_backtest
+            for s in imbalance maker ema; do
+              "build/$cxx/ot_backtest" --synthetic 42:8:200000 --strategy $s | grep digest | sed "s/^/$cxx $s /"
+            done
+          done | tee digests.txt
+          for s in imbalance maker ema; do
+            test "$(grep " $s " digests.txt | awk '{print $NF}' | sort -u | wc -l)" = 1
+          done
+
+  benchmark:
+    name: Benchmark (indicative only)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - run: cmake --preset release && cmake --build --preset release --target ot_bench
+      - name: Run
+        run: |
+          mkdir -p bench-out
+          ./build/release/ot_bench --strategy all --messages 1000000 --cpu 1 --csv bench-out/bench.csv | tee bench-out/bench.txt
+          { echo '### ot_bench on a shared CI runner (not an isolated core: indicative only)'; echo '```'; cat bench-out/bench.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: benchmark
+          path: bench-out/
