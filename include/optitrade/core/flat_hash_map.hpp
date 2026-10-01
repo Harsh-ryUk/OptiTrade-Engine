@@ -89,6 +89,18 @@ public:
         return {&s.value, true};
     }
 
+    // Starts loading the slot where `key` hashes to, without waiting for it. A lookup of a
+    // key that was not touched recently otherwise stalls on a cache miss; callers that know
+    // a few operations ahead which keys they will need can hide that latency. Pure hint: no
+    // observable effect on the map.
+    void prefetch(const K& key) const noexcept {
+#if defined(__GNUC__) || defined(__clang__)
+        __builtin_prefetch(&slots_[home(key)]);
+#else
+        (void)key;
+#endif
+    }
+
     bool erase(const K& key) noexcept {
         std::size_t hole = probe(key);
         if (!slots_[hole].used) return false;

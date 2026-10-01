@@ -15,7 +15,7 @@ capture/replay and a backtester let you test everything without a market connect
   proves message processing allocates nothing ([design](docs/DESIGN.md)).
 * **Deterministic.** Integer arithmetic only. A full backtest produces the same digest on macOS (Apple clang),
   Linux gcc and Linux clang, and the repository tests that.
-* **Heavily verified.** About 35 test programs, differential and model-based tests, fuzzing, sanitizers
+* **Heavily verified.** About 37 test programs, differential and model-based tests, fuzzing, sanitizers
   ([testing](docs/TESTING.md)).
 * **Header-only, no dependencies** beyond the C++ standard library and POSIX sockets.
 
@@ -43,6 +43,7 @@ ctest --preset release
 | `ot_bench` | tick-to-decision latency, with coordinated-omission-aware open-loop mode |
 | `ot_udp_demo` | three-thread MoldUDP64 pipeline with loss injection and gap handling |
 | `ot_itch_inspect` | statistics and book state for a Nasdaq ITCH file |
+| `ot_replay_bench` | feed replay throughput (decode + order books) on a Nasdaq BinaryFILE |
 | `ot_book_dump` | print an order-book ladder as CSV (`tools/plot_book.py` draws it) |
 
 Presets: `dev`, `release`, `asan` (ASan + UBSan), `tsan`, `fuzz` (libFuzzer, clang).
@@ -81,6 +82,11 @@ All numbers below come from runs of the code in this repository.
 
 This is the engine's own processing time for one message, not wire-to-wire latency, and it has not been
 measured on x86 or an isolated core.
+
+**Feed replay on the real Nasdaq file** (30 December 2019, 268.7 M messages, memory-mapped, single thread, decode plus
+order books): 5.2 M messages/s over the whole day including disk reads, and 6.4 to 6.8 M messages/s when the file is in
+memory ([details](docs/BENCHMARKING.md#feed-replay-throughput-ot_replay_bench)). A profile-guided pass raised these from
+3.7 and 4.6 M messages/s.
 
 ![Latency](docs/img/latency.png)
 

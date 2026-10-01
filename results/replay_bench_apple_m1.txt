@@ -1,0 +1,26 @@
+ot_replay_bench: feed path throughput (decode + MarketBooks) on Nasdaq's 30 Dec 2019 ITCH file.
+Apple M1, macOS, Release (-O3), single thread, memory-mapped input, unpinned.
+
+== first 2 GB of the file (64.5 M messages, fits in memory: CPU cost only)
+$ ot_replay_bench --max-orders 4194304 --levels 1024 --ahead 0,8,16,32 slice.itch
+file 2.00 GB, max_orders 4194304, levels/side 1024
+mode             messages    seconds      M msg/s     ns/msg
+frames           64539695       3.42        18.88       53.0
+decode           64539695       0.80        80.78       12.4
+books+pf0        64539695      11.41         5.66      176.8   (refused 52444)
+books+pf8        64539695       9.64         6.69      149.4   (refused 52444)
+books+pf16       64539695      10.13         6.37      157.0   (refused 52444)
+books+pf32       64539695       9.56         6.75      148.1   (refused 52444)
+
+== whole day (268.7 M messages, 8.25 GB: includes reading the file from disk)
+$ ot_replay_bench --max-orders 8388608 --levels 1024 --ahead 0,16,32 full.itch
+mode             messages    seconds      M msg/s     ns/msg
+frames          268744780      16.75        16.04       62.3
+decode          268744780      18.56        14.48       69.0
+books+pf0       268744780      66.67         4.03      248.1   (refused 58314)
+books+pf16      268744780      53.64         5.01      199.6   (refused 58314)
+books+pf32      268744780      51.75         5.19      192.6   (refused 58314)
+
+== before the optimisation (same machine, same files; commit 44738c0)
+slice  books: 219.1 ns/msg =  4.56 M msg/s
+day    books: 270.1 ns/msg =  3.70 M msg/s

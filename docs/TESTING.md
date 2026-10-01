@@ -19,6 +19,8 @@ dependency-free harness).
 | Known-answer vectors | `test_itch_*`, `test_ouch_*`, `test_mold64`, `test_risk_engine`, `test_exchange_sim` | Byte layouts typed by hand from the specs (not produced by the project's own encoder, so a symmetric bug cannot hide), and hand-computed PnL, fills and queue positions |
 | Differential tests | `test_book_differential`, `test_core_flat_hash_map_differential` | Fast data structures compared after *every* operation with a naive `std::map` / `std::unordered_map` model over hundreds of thousands of random operations, including invalid ones |
 | Model-based tests | `test_oms_model` | A naive exchange that produces legal and illegal report sequences (races, duplicates, reordering, forged tokens); invariants such as "risk exposure equals the sum of open quantities" are checked after every step |
+| Differential tests (ladder) | `test_book_ladder_window` | Books with hundreds of levels and operations at every distance from the best price, compared with a `std::map` reference after every operation; also depths around the search-window boundary |
+| Hint tests | `test_book_prefetch` | Cache hints never change results and accept any bytes |
 | Property tests | `test_synthetic_market`, `test_strategy_*` | Generated markets never cross or reference unknown orders; strategies never emit invalid orders and are deterministic |
 | Fuzz smoke tests | `test_*_fuzz_smoke` | The libFuzzer property bodies run on every ctest with deterministic pseudo-random and mutated input |
 | libFuzzer targets | `fuzz/fuzz_*.cpp` | Coverage-guided fuzzing of the ITCH, OUCH and MoldUDP64 decoders and of the order book fed by a fuzzed ITCH stream. |

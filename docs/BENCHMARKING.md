@@ -55,3 +55,30 @@ the engine alone.
 * Numbers from different machines, compilers or operating systems are not comparable, and these figures
   have not been measured on x86 hardware.
 * CI runs the benchmark on every push as an artifact on shared runners; treat those as indicative only.
+
+## Feed replay throughput (`ot_replay_bench`)
+
+`ot_replay_bench` memory-maps a Nasdaq BinaryFILE and times the market data path on its own: walking the
+frames, decoding, and decoding plus `MarketBooks` updates, single threaded, on the real 30 December 2019 file.
+Raw output: `results/replay_bench_apple_m1.txt`.
+
+| Input | Before | After | Notes |
+|---|---:|---:|---|
+| First 2 GB, 64.5 M messages (in memory, CPU cost only) | 219 ns/msg, 4.6 M msg/s | 148-157 ns/msg, 6.4-6.8 M msg/s | |
+| Whole day, 268.7 M messages (reads 8.25 GB from disk) | 270 ns/msg, 3.7 M msg/s | 193 ns/msg, 5.2 M msg/s | about 62 ns/msg of this is the file read alone |
+
+What was measured and changed:
+
+1. Profiling the baseline showed about 70 % of the time inside the order book's level management, not in decoding
+   (which costs about 12 ns per message) and not mainly in the hash table.
+2. On the real feed 40 % of level operations hit the best price, 63 % are within three levels and 94 % within 31
+   (about 130 levels per book on average). So the book now looks at the last few levels first instead of always
+   binary searching.
+3. Each level and the id of its incarnation live side by side, so touching a level reads one cache line instead of two.
+4. `MarketBooks::prefetch()` lets a caller that has several messages in hand (a file, or a MoldUDP64 packet) start
+   loading the order-table slot and the book's best-price lines a few messages early. It is a pure hint:
+   a test shows identical results with and without it, and that any bytes are accepted.
+
+Prefetching alone gave about 14 %; the remaining gain comes from the book layout. Behaviour is unchanged: every book
+test, the differential tests and the frozen backtest digests pass unmodified. Single-message callers (the live engine
+path) benefit from the layout changes but not from prefetch.

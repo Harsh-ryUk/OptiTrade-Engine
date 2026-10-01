@@ -8,8 +8,10 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <span>
 
 #include "optitrade/book/order_book.hpp"
+#include "optitrade/core/endian.hpp"
 #include "optitrade/core/flat_hash_map.hpp"
 #include "optitrade/core/types.hpp"
 #include "optitrade/itch/messages.hpp"
@@ -185,6 +187,31 @@ public:
     }
 
     // The pointer is valid until the next call that modifies the books.
+    // Cache hint for the order table. Given a raw ITCH message that will be applied soon
+    // (typically a few messages ahead of the one being applied), starts loading the table slots
+    // it will touch. Every order-flow message carries its order reference at offset 11 (a
+    // replace also names the new reference at offset 19). Any span is acceptable: too short,
+    // unknown type or garbage all do nothing. It never changes state, so results are identical
+    // with or without it; it only matters for speed when the table is larger than the cache.
+    void prefetch(std::span<const std::byte> itch_message) const noexcept {
+        if (itch_message.size() < 19) return;
+        // The instrument's book: the slot holds the pointer, the book holds the ladders.
+        if (const Slot* sl = find_slot(be::load16(itch_message.data() + 1)); sl != nullptr && sl->book != nullptr) {
+            sl->book->prefetch();
+        }
+        switch (static_cast<char>(itch_message[0])) {
+            case 'A': case 'F': case 'E': case 'C': case 'X': case 'D':
+                orders_.prefetch(be::load64(itch_message.data() + 11));
+                break;
+            case 'U':
+                orders_.prefetch(be::load64(itch_message.data() + 11));
+                if (itch_message.size() >= 27) orders_.prefetch(be::load64(itch_message.data() + 19));
+                break;
+            default:
+                break;
+        }
+    }
+
     const OrderInfo* order(OrderRef ref) const noexcept {
         const OrderRecord* rec = orders_.find(ref);
         return rec == nullptr ? nullptr : &rec->info;
