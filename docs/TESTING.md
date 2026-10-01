@@ -49,9 +49,22 @@ checks bypassing limits, order-slot exhaustion) and in the exchange simulator (q
 our own orders, fills outside a limit, double fill of a marketable remainder); each is fixed with a regression
 test. The same passes confirmed the allocation, SPSC ring and benchmark-method claims.
 
+## Real market data
+
+The decoder, books, engine and simulator were run on Nasdaq's public ITCH 5.0 sample file for 30 December 2019
+(8.25 GB, 268 744 780 messages, 8 906 instruments; results in `results/real_data_nasdaq_2019-12-30.txt`):
+
+* No decode errors, unknown orders, duplicates or invalid updates across the whole day, and no live orders left at
+  the end of the day (every order the feed added is accounted for by a later cancel, delete or execution).
+* The run exposed three defects that synthetic data hid, now fixed with a regression test: placeholder quotes
+  (extremely wide or stale bid/ask pairs in thin pre-market books) gave meaningless mid prices, a final re-marking pass
+  valued a $41 position at about $100 000, and real feeds need a price band with a mandatory reference price.
+* The price-level cap is a deliberate memory trade-off; at 1 024 levels per side 0.02 % of messages are refused (the
+  backtester reports it).
+
 ## What is not covered
 
-* Real Nasdaq data: only synthetic markets have been run end to end. `ot_itch_inspect` and `ot_backtest
-  --itch` are written for the real sample files but untested against them.
+* Only one real trading day has been run (Nasdaq's public sample for 30 December 2019, see below); other
+  days, other venues and live feeds are untested.
 * Real hardware: all measurements so far are from ordinary machines, not isolated bare-metal cores or a NIC.
 * The multicast data path is only exercised where the host allows it (tests skip otherwise).

@@ -92,8 +92,8 @@ processes them.
 
 ## Known limitations
 
-* The fill model is an approximation (above) and the data are synthetic; nothing here predicts real
-  profitability.
+* The fill model is an approximation (above) and the strategies are untuned; nothing here predicts real
+  profitability. Only one real trading day has been replayed.
 * Hash-table order references are trusted: an adversary who controls order reference numbers could force
   collisions. A real exchange assigns them.
 * No retransmission requests, no SoupBinTCP session layer, no TCP order entry.

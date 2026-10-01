@@ -111,6 +111,43 @@ The order book the engine maintains for one instrument (synthetic market):
 
 ![Order book depth](docs/img/book_depth.png)
 
+## Real Nasdaq data
+
+The tools were run on Nasdaq's public sample file for 30 December 2019 (`12302019.NASDAQ_ITCH50.gz`,
+8.25 GB uncompressed, **268 744 780 messages, 8 906 instruments**). Raw output is in
+[`results/real_data_nasdaq_2019-12-30.txt`](results/real_data_nasdaq_2019-12-30.txt).
+
+* **Decoder and order books:** zero decode errors, zero unknown orders, zero duplicates, zero invalid updates,
+  and **zero live orders at the end of the day**: every order the feed added was later cancelled, deleted or
+  executed, so the book accounting agrees with Nasdaq's for the whole session.
+* **Full pipeline** (decode, books, strategy, risk, order manager, exchange simulator) over the whole day takes
+  3.5 to 4.2 minutes per strategy on an M1 laptop and about 3 GB of memory.
+* Running on real data found and fixed three problems that the synthetic market could not show: quotes at
+  placeholder prices were used as a reference price, the backtester re-marked positions against such
+  quotes at the end of the run, and the backtester ran without a price band, so strategies traded at those quotes.
+* 58 314 of the 268.7 M messages (0.02 %) exceeded the configured limit of 1 024 price levels per side and were
+  refused by the books; the backtester warns about this.
+
+| Strategy (real data, full day) | Orders | Shares traded | Total PnL |
+|---|---:|---:|---:|
+| Imbalance taker | 6.96 M | 444 M | -$5.6 M |
+| Microprice maker | 1.68 M | 36 M | -$1.2 M |
+| EMA crossover | 8.36 M | 539 M | -$93.1 M |
+
+The strategies are simple and untuned, and the simulator is an approximation, so these losses (mostly the cost of
+crossing the spread) are not a statement about any real strategy. They show that the whole stack handles a full
+real trading day.
+
+To reproduce (the file is not redistributed here):
+
+```bash
+curl -O "https://emi.nasdaq.com/ITCH/Nasdaq%20ITCH/12302019.NASDAQ_ITCH50.gz"   # 3.5 GB
+gunzip 12302019.NASDAQ_ITCH50.gz
+./build/release/ot_itch_inspect --max-orders 8388608 --levels 1024 12302019.NASDAQ_ITCH50
+./build/release/ot_backtest --itch 12302019.NASDAQ_ITCH50 --strategy imbalance \
+    --book-orders 8388608 --book-levels 1024 --session-orders 4194304
+```
+
 ## Verification
 
 Every change is checked by CI on Linux (gcc and clang), macOS, with AddressSanitizer + UBSan, with
@@ -122,8 +159,8 @@ has a regression test. Details and the list of what is **not** covered are in
 ## Limitations
 
 * The exchange simulator is an approximation (displayed liquidity, no market impact, conservative queue
-  position). Only synthetic data have been run end to end; real Nasdaq sample files are supported by the tools
-  but untested.
+  position), and the strategies are untuned: backtest PnL says nothing about real profitability. Real data has
+  been run for one trading day (30 December 2019) only.
 * No retransmission requests, no SoupBinTCP or TCP order entry, no kernel-bypass networking.
 * GCC and Clang only (`__int128` is used for overflow-free accounting).
 

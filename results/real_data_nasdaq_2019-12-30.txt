@@ -1,0 +1,115 @@
+Nasdaq TotalView-ITCH 5.0 sample file 12302019.NASDAQ_ITCH50 (30 December 2019), 8.25 GB, run on an Apple M1 laptop.
+Source: https://emi.nasdaq.com/ITCH/Nasdaq%20ITCH/12302019.NASDAQ_ITCH50.gz  (not redistributed in this repository)
+
+$ ot_itch_inspect --max-orders 8388608 --levels 1024 12302019.NASDAQ_ITCH50
+file      12302019.NASDAQ_ITCH50
+messages  268744780
+
+message types
+  'A'         117145568   43.59%
+  'D'         114360997   42.55%
+  'U'          21639067    8.05%
+  'E'           5722824    2.13%
+  'I'*          4024315    1.50%
+  'X'           2787676    1.04%
+  'F'           1485888    0.55%
+  'P'           1218602    0.45%
+  'L'*           215161    0.08%
+  'C'             99917    0.04%
+  'Q'*            17836    0.01%
+  'Y'*             9013    0.00%
+  'H'*             8966    0.00%
+  'R'              8906    0.00%
+  'J'*               34    0.00%
+  'S'                 6    0.00%
+  'K'*                3    0.00%
+  'V'*                1    0.00%
+  (* = type not modelled by the decoder; counted, not applied)
+
+time span
+  first   03:04:32.057543747
+  last    20:05:00.000040070
+  span    61227.942 s (min to max timestamp)
+
+state at end of file
+  stock directory entries  8906
+  books                    8906
+  live orders              0
+  depth overflows          63840
+
+most active instruments (top of book)
+  symbol   locate     messages  best bid                    best ask                    
+  QQQ      6556        2370874  -                           -                           
+  SPY      7451        2132141  -                           -                           
+  IWM      4315        1938573  -                           -                           
+  TQQQ     7931        1624544  -                           -                           
+  AMD      344         1505908  -                           -                           
+
+anomalies
+  decode truncated        0
+  decode bad_length       0
+  decode bad_field        0
+  apply  unknown_order    0
+  apply  duplicate_order  0
+  apply  unknown_symbol   0
+  apply  capacity         58314
+  apply  invalid          0
+  total                   58314
+
+$ ot_backtest --itch 12302019.NASDAQ_ITCH50 --strategy {imbalance,maker,ema} --book-orders 8388608 --book-levels 1024 --session-orders 4194304
+(stderr and /usr/bin/time -l output included; the PnL is in price units of the report, in currency)
+
+== imbalance
+ot_backtest: warning: the order books refused 58314 messages; they are probably too small for this feed (raise --book-orders or --book-levels); results are unreliable
+ot_backtest: note: 4275329 ITCH messages were not applied (message types this engine does not model, such as trading actions, plus any malformed ones)
+== imbalance on 12302019.NASDAQ_ITCH50 ==
+messages        268744780
+book updates    263183623
+orders sent     6957148
+risk rejects    9342
+fills           6786892
+volume          444296593
+realized pnl    -5601801.9738
+unrealized pnl  -4704.6494
+total pnl       -5606506.6232
+max drawdown    5613855.8032
+book errors     58314  (books refused messages; undersized books? results unreliable)
+itch skipped    4275329  (messages not applied: unsupported types or malformed)
+digest          590352a7345428f9
+      231.07 real       200.42 user        13.56 sys
+== maker
+ot_backtest: warning: the order books refused 58314 messages; they are probably too small for this feed (raise --book-orders or --book-levels); results are unreliable
+ot_backtest: note: 4275329 ITCH messages were not applied (message types this engine does not model, such as trading actions, plus any malformed ones)
+== maker on 12302019.NASDAQ_ITCH50 ==
+messages        268744780
+book updates    263183623
+orders sent     1680383
+risk rejects    651341
+fills           417500
+volume          36178075
+realized pnl    -1227497.1037
+unrealized pnl  -19588.3865
+total pnl       -1247085.4902
+max drawdown    1256738.4146
+book errors     58314  (books refused messages; undersized books? results unreliable)
+itch skipped    4275329  (messages not applied: unsupported types or malformed)
+digest          25c63ea1d8594790
+      253.74 real       222.51 user        15.72 sys
+== ema
+ot_backtest: warning: the order books refused 58314 messages; they are probably too small for this feed (raise --book-orders or --book-levels); results are unreliable
+ot_backtest: note: 4275329 ITCH messages were not applied (message types this engine does not model, such as trading actions, plus any malformed ones)
+== ema on 12302019.NASDAQ_ITCH50 ==
+messages        268744780
+book updates    263183623
+orders sent     8355762
+risk rejects    69864
+fills           8296449
+volume          538962597
+realized pnl    -92669828.9686
+unrealized pnl  -469664.2371
+total pnl       -93139493.2057
+max drawdown    93139493.2057
+book errors     58314  (books refused messages; undersized books? results unreliable)
+itch skipped    4275329  (messages not applied: unsupported types or malformed)
+digest          b9e63db8e95991a1
+      208.12 real       192.24 user        11.16 sys
