@@ -133,7 +133,7 @@ int main(int argc, char** argv) {
     std::printf("file %.2f GB, max_orders %zu, levels/side %zu\n", static_cast<double>(size) / 1e9, max_orders, levels);
     std::printf("%-12s %12s %10s %12s %10s\n", "mode", "messages", "seconds", "M msg/s", "ns/msg");
     for (std::size_t rep = 0; rep < repeat; ++rep) {
-        for (const auto [mode, name] : {std::pair{Mode::frames, "frames"}, std::pair{Mode::decode, "decode"}}) {
+        for (const auto& [mode, name] : {std::pair{Mode::frames, "frames"}, std::pair{Mode::decode, "decode"}}) {
             const Result r = run(mode, data, size, max_orders, levels, 0);
             std::printf("%-12s %12llu %10.2f %12.2f %10.1f\n", name, static_cast<unsigned long long>(r.messages),
                         r.seconds, static_cast<double>(r.messages) / r.seconds / 1e6,

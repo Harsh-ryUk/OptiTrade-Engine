@@ -82,3 +82,22 @@ What was measured and changed:
 Prefetching alone gave about 14 %; the remaining gain comes from the book layout. Behaviour is unchanged: every book
 test, the differential tests and the frozen backtest digests pass unmodified. Single-message callers (the live engine
 path) benefit from the layout changes but not from prefetch.
+
+## Benchmarking on Linux x86 (`scripts/linux_benchmark.sh`)
+
+The numbers above come from a laptop. For tail latencies worth quoting, run on a Linux machine with an isolated core:
+
+1. **Prepare the machine** (the script changes nothing, it only records what it finds):
+   * performance CPU governor: `sudo cpupower frequency-set -g performance`
+   * an isolated core: boot with `isolcpus=2 nohz_full=2 rcu_nocbs=2` (core number is your choice)
+   * a bare-metal or dedicated host if possible; shared virtual machines add scheduler noise you cannot remove
+   * nothing else running
+2. **Run it:**
+   ```bash
+   scripts/linux_benchmark.sh --cpu 2 --runs 5 --messages 5000000
+   scripts/linux_benchmark.sh --cpu 2 --itch /path/to/12302019.NASDAQ_ITCH50   # also times the feed replay
+   ```
+3. The results land in `results/linux_<host>_cpu<N>/`: `summary.txt` (environment, medians across runs for all three
+   strategies, and open-loop service/response times at 1, 2 and 5 M msg/s) plus the raw per-run files.
+
+Report medians across runs together with the environment block, and say whether the core was isolated.

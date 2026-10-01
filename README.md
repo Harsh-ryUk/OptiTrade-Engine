@@ -44,6 +44,7 @@ ctest --preset release
 | `ot_udp_demo` | three-thread MoldUDP64 pipeline with loss injection and gap handling |
 | `ot_itch_inspect` | statistics and book state for a Nasdaq ITCH file |
 | `ot_replay_bench` | feed replay throughput (decode + order books) on a Nasdaq BinaryFILE |
+| `scripts/linux_benchmark.sh` | pinned, multi-run latency benchmark for a Linux machine; writes a results folder |
 | `ot_book_dump` | print an order-book ladder as CSV (`tools/plot_book.py` draws it) |
 
 Presets: `dev`, `release`, `asan` (ASan + UBSan), `tsan`, `fuzz` (libFuzzer, clang).
