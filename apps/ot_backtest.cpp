@@ -55,6 +55,10 @@ void usage(std::FILE* out) {
         "                   and to reports coming back (default 50)\n"
         "  --book-orders N  live-order capacity of the order books for --capture/--itch\n"
         "                   (default 2097152)\n"
+        "  --price-band-bps N  reject orders priced more than N basis points from the mid for\n"
+        "                   --capture/--itch (default 500; 0 disables)\n"
+        "  --book-levels N  price levels kept per side and instrument for --capture/--itch\n"
+        "                   (default 256)\n"
         "  --session-orders N  order-table slots: orders that may be working at the same moment\n"
         "                   (default 262144). Finished orders give their slot back, so this is\n"
         "                   not a limit on the run; a full table is reported as capacity rejects\n"
@@ -123,6 +127,8 @@ struct Options {
     std::uint64_t latency_us{50};
     std::uint64_t book_orders{1u << 21};
     std::uint64_t session_orders{1u << 18};
+    std::uint64_t price_band_bps{500};  // pre-trade price band for --capture/--itch; 0 disables
+    std::uint64_t book_levels{256};  // price levels kept per side and instrument for --capture/--itch
     bool json{false};
 };
 
@@ -143,8 +149,16 @@ replay::BacktestConfig make_config(const Options& o) {
         c.sim.books.max_symbols = std::size_t{1} << 14;
         c.engine.max_locates = std::size_t{1} << 14;
     }
-    c.sim.books.max_levels_per_side = 64;  // the strategies look at the top 5; deeper levels are dropped
+    // The strategies look at the top 5 levels. Synthetic markets stay shallow; real feeds need more
+    // room because deep or illiquid instruments spread orders over many prices.
+    c.sim.books.max_levels_per_side = o.synthetic ? 64 : static_cast<std::size_t>(o.book_levels);
     c.engine.books = c.sim.books;
+    // Real feeds contain placeholder and stale quotes (pre-market spreads of tens of percent).
+    // Without a band a spread-crossing strategy happily trades at those prices.
+    if (!o.synthetic) {
+        c.engine.limits.price_band_bps = static_cast<std::uint32_t>(o.price_band_bps);
+        c.engine.limits.require_reference = o.price_band_bps != 0;  // no sane market, no order
+    }
     return c;
 }
 
@@ -188,11 +202,13 @@ int run(Source& src, const Options& o, const char* title) {
     if (r.book_errors != 0) {
         std::fprintf(stderr,
                      "ot_backtest: warning: the order books refused %llu messages; they are probably too small for "
-                     "this feed (raise --book-orders); results are unreliable\n",
+                     "this feed (raise --book-orders or --book-levels); results are unreliable\n",
                      u(r.book_errors));
     }
     if (r.itch_skipped != 0) {
-        std::fprintf(stderr, "ot_backtest: warning: %llu ITCH messages could not be decoded and were skipped\n",
+        std::fprintf(stderr,
+                     "ot_backtest: note: %llu ITCH messages were not applied (message types this engine does not "
+                     "model, such as trading actions, plus any malformed ones)\n",
                      u(r.itch_skipped));
     }
     if (r.dropped_reports != 0) {
@@ -252,8 +268,10 @@ int main(int argc, char** argv) {
         const bool is_latency = std::strcmp(arg, "--latency-us") == 0;
         const bool is_book_orders = std::strcmp(arg, "--book-orders") == 0;
         const bool is_session_orders = std::strcmp(arg, "--session-orders") == 0;
+        const bool is_book_levels = std::strcmp(arg, "--book-levels") == 0;
+        const bool is_band = std::strcmp(arg, "--price-band-bps") == 0;
         if (!is_capture && !is_itch && !is_synth && !is_strategy && !is_latency && !is_book_orders &&
-            !is_session_orders) {
+            !is_session_orders && !is_book_levels && !is_band) {
             std::fprintf(stderr, "ot_backtest: unknown argument '%s' (try --help)\n", arg);
             return kExitUsage;
         }
@@ -284,6 +302,12 @@ int main(int argc, char** argv) {
         } else if (is_book_orders) {
             good = parse_u64(value, std::uint64_t{1} << 28, n) && n >= 1;
             o.book_orders = n;
+        } else if (is_band) {
+            good = parse_u64(value, 10000, n);
+            o.price_band_bps = n;
+        } else if (is_book_levels) {
+            good = parse_u64(value, 4096, n) && n >= 1;
+            o.book_levels = n;
         } else {
             good = parse_u64(value, std::uint64_t{1} << 28, n) && n >= 1;
             o.session_orders = n;

@@ -575,6 +575,30 @@ OT_TEST(mark_follows_the_book_mid_and_holds_when_no_mid_exists) {
     OT_CHECK_EQ(r.eng.risk().unrealized_pnl(), std::int64_t{-70'000});
 }
 
+// Real feeds carry placeholder quotes (an ask of 90 000 against a bid of 100). Their "mid" must not
+// be used to value a position or as a reference price.
+OT_TEST(placeholder_quotes_do_not_move_the_mark_or_the_reference_price) {
+    engine::Config c = small_config();
+    c.limits.price_band_bps = 100;
+    c.limits.require_reference = true;
+    Rig<> r(c);
+    r.aapl_book();  // bid 1000000, ask 1010000: mid 1005000
+    r.eng.orders().submit({kAapl, Side::buy, 1'010'000, 10, oms::Tif::day}, 1);
+    r.eng.on_ouch(accepted(1, 5, 10, 1'010'000).view(), 2);
+    r.eng.on_ouch(executed(1, 10, 1'010'000).view(), 3);  // long 10 @ 1010000
+    OT_CHECK_EQ(r.eng.risk().unrealized_pnl(), std::int64_t{-50'000});
+
+    r.itch(del(kAapl, 2));                                   // real ask gone
+    r.itch(add(kAapl, 20, Side::sell, 5, 900'000'000));      // placeholder ask: spread is ~99.8 % of the mid
+    OT_CHECK_EQ(r.eng.risk().unrealized_pnl(), std::int64_t{-50'000});  // mark untouched, not ~ 450 000 000
+
+    // No trustworthy reference exists, so a band-checked order is refused instead of being compared
+    // with the placeholder mid.
+    const oms::SubmitResult s = r.eng.orders().submit({kAapl, Side::buy, 1'005'000, 10, oms::Tif::day}, 4);
+    OT_CHECK(s.status == oms::SubmitStatus::rejected_by_risk);
+    OT_CHECK(s.risk_reason == risk::Reject::no_reference);
+}
+
 OT_TEST(loss_limit_trips_the_kill_switch_from_book_marks) {
     engine::Config c = small_config();
     c.limits.max_loss = 50'000;

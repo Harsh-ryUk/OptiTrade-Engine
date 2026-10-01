@@ -46,9 +46,10 @@
 //     simulator is advanced to the end of time and every report is delivered, repeatedly,
 //     because a strategy may react to a report with another order. The loop is bounded
 //     (kMaxFlushRounds); a strategy that keeps answering forever is cut off there.
-//   * Unrealized PnL is marked at the mid of each instrument's final book (the same mid
-//     definition the engine uses: both sides present and not crossed). An instrument
-//     without a valid mid keeps its last mark from the engine.
+//   * Unrealized PnL uses the marks the engine keeps up to date after every book change: the
+//     mid of a trustworthy touch (both sides present, not crossed, spread at most 10 % of the
+//     mid), else the last execution price. There is deliberately no separate marking pass at
+//     the end: one with a looser definition of "mid" valued positions against placeholder quotes.
 //   * PnL and drawdown are in price units (1e-4 currency), as in the risk engine.
 //   * `volume` is the sum of executed shares in the reports delivered to the engine.
 //   * `dropped_reports` is an addition to the documented report fields. It stays 0 unless the
@@ -141,14 +142,6 @@ struct VolumeCounter : ouch::NullHandler {
     std::uint64_t shares{};
 };
 
-// Mid of a sane touch (both sides present, positive, not crossed), else 0.
-inline Price mid_of(const book::OrderBook* b) noexcept {
-    if (b == nullptr) return 0;
-    const auto bid = b->best(Side::buy);
-    const auto ask = b->best(Side::sell);
-    if (!bid || !ask || bid->price <= 0 || bid->price >= ask->price) return 0;
-    return bid->price + (ask->price - bid->price) / 2;
-}
 
 }  // namespace detail
 
@@ -193,12 +186,6 @@ BacktestReport run_backtest(Source& src, const BacktestConfig& config, S strateg
     for (int round = 0; round < detail::kMaxFlushRounds; ++round) {
         exchange.advance(kEndOfTime);
         if (deliver(kEndOfTime) == 0) break;
-    }
-
-    const std::size_t locates = std::min(config.engine.max_locates, risk::RiskEngine::kMaxLocates);
-    for (std::size_t l = 0; l < locates; ++l) {
-        const auto loc = static_cast<Locate>(l);
-        if (const Price mid = detail::mid_of(eng.books().book(loc)); mid > 0) eng.risk().mark(loc, mid);
     }
 
     const engine::Stats& st = eng.stats();
@@ -264,7 +251,7 @@ inline void print_report(const BacktestReport& r, const char* title, std::FILE* 
                      u(r.book_errors));
     }
     if (r.itch_skipped != 0) {
-        std::fprintf(out, "itch skipped    %llu  (messages not decoded)\n", u(r.itch_skipped));
+        std::fprintf(out, "itch skipped    %llu  (messages not applied: unsupported types or malformed)\n", u(r.itch_skipped));
     }
     std::fprintf(out, "digest          %016llx\n", u(r.digest));
 }

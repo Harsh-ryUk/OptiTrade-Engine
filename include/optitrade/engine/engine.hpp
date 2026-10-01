@@ -47,10 +47,11 @@
 //     returned Applied::ok. Stock Directory, System Event and Trade never wake the strategy.
 //     A message the books refuse (unknown order, duplicate, invalid, capacity) is counted in
 //     book_errors and does not wake it either.
-//   * Reference price for risk: the mid of the best bid and ask while both exist and the book
-//     is not locked or crossed (a damaged book has no meaningful mid); otherwise the last
-//     execution price of the instrument; otherwise 0 (unknown). The same mid marks the
-//     position in the risk engine after every applied order-flow message.
+//   * Reference price for risk: the mid of the best bid and ask while both exist, the book is
+//     not locked or crossed and the spread is at most 10 % of the mid (a damaged or placeholder
+//     book has no meaningful mid); otherwise the last execution price of the instrument;
+//     otherwise 0 (unknown). The same value marks the position in the risk engine after every
+//     applied order-flow message.
 //   * Gap handling. on_feed_gap() cancels every open order, halts the strategy's book callbacks
 //     and turns the strategy's submit/replace into a refusal (SubmitStatus::bad_state). Cancels
 //     stay possible. Order reports and fills keep flowing to the strategy, because its view of
@@ -274,9 +275,16 @@ private:
     }
 
     void book_changed(Locate loc, Nanos now) noexcept {
-        if (const Price mid = mid_price(loc); mid > 0) risk_.mark(loc, mid);
+        Price mark = mid_price(loc);
+        if (mark <= 0) mark = books_.last_trade(loc);  // no trustworthy mid: fall back to the last execution
+        if (mark > 0) risk_.mark(loc, mark);
         if (trading_ && loc < max_locates_) strategy_.on_book_update(loc, context(now));
     }
+
+    // A touch wider than this fraction of the mid is treated as no market at all: real feeds
+    // carry placeholder and stale quotes (for example 0.01 against 199 999.99 before the open)
+    // whose mid is meaningless and would produce absurd marks and reference prices.
+    static constexpr Price kMaxSpreadPerMid = 10;  // spread may not exceed mid / 10, i.e. 10 %
 
     // Mid of a sane touch, else 0. The half-spread form cannot overflow.
     Price mid_price(Locate loc) const noexcept {
@@ -285,7 +293,10 @@ private:
         const auto bid = b->best(Side::buy);
         const auto ask = b->best(Side::sell);
         if (!bid || !ask || bid->price <= 0 || bid->price >= ask->price) return 0;
-        return bid->price + (ask->price - bid->price) / 2;
+        const Price spread = ask->price - bid->price;
+        const Price mid = bid->price + spread / 2;
+        if (spread > mid / kMaxSpreadPerMid) return 0;
+        return mid;
     }
 
     void report(const ouch::Accepted& m, Nanos now) noexcept { ++stats_.ouch_reports; orders_.on_accepted(m, now); }
