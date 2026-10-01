@@ -56,12 +56,24 @@
 //     stay possible. Order reports and fills keep flowing to the strategy, because its view of
 //     its own orders must stay correct while it is halted; the books keep applying messages
 //     so the caller can rebuild them by replaying a snapshot, then call resume_trading().
+//     A gateway may refuse the cancels (its queue is full). While halted with open orders the
+//     engine therefore repeats the cancel sweep from on_itch() and on_ouch(), at most once per
+//     kGapRetryNs of message time; orders whose cancel is already in flight are skipped by the
+//     sweep. What the halt guarantees: after on_feed_gap() the engine sends no new order and no
+//     replace, and every order it had open gets a cancel as soon as the gateway takes one. What
+//     it cannot guarantee: an order that is live at the exchange can still fill until its
+//     cancel arrives there, and those fills reach the strategy. Call resume_trading() only once
+//     open_orders() is 0 or the cancels are known to be in flight; an order whose cancel was
+//     never accepted stays working after a resume.
 //   * Stats. itch_messages / ouch_reports count messages that decoded and were delivered.
 //     itch_skipped counts messages that did not decode (unsupported type or malformed), like
 //     StreamResult::skipped; ouch_errors is the same for OUCH. book_errors counts decoded
 //     messages the books refused. orders_sent counts new orders the gateway accepted;
 //     risk_rejects counts submits and replaces refused by pre-trade risk. Both count what the
 //     strategy does through its OrderApi; calls made directly on orders() are not counted.
+//     capacity_rejects counts strategy submits, replaces and cancels the order manager or the
+//     gateway refused for lack of room (SubmitStatus::capacity, SubmitStatus::gateway_busy); a
+//     non-zero value means the run was cut short by table sizes, not by the strategy.
 //     fills counts executions applied to an order.
 //   * Locates at or above Config::max_locates still feed the books but never reach the
 //     strategy (risk and the strategy size their tables by max_locates).
@@ -103,6 +115,7 @@ struct Stats {
     std::uint64_t orders_sent{};    // new orders accepted by the gateway
     std::uint64_t risk_rejects{};   // strategy submits/replaces refused by pre-trade risk
     std::uint64_t fills{};          // executions applied to orders
+    std::uint64_t capacity_rejects{};  // strategy requests refused: order table or gateway full
 };
 
 template <strategy::Strategy S>
@@ -129,6 +142,7 @@ public:
         ItchSink sink{*this, now};
         const DecodeStatus st = itch::decode(msg, sink);
         if (st != DecodeStatus::ok) ++stats_.itch_skipped;
+        retry_gap_cancels(now);
         return st;
     }
 
@@ -137,6 +151,7 @@ public:
         OuchSink sink{*this, now};
         const DecodeStatus st = ouch::decode_outbound(msg, sink);
         if (st != DecodeStatus::ok) ++stats_.ouch_errors;
+        retry_gap_cancels(now);
         return st;
     }
 
@@ -146,6 +161,7 @@ public:
     void on_feed_gap(Nanos now) noexcept {
         ++stats_.feed_gaps;
         trading_ = false;
+        next_gap_retry_ = saturating_add(now, kGapRetryNs);
         orders_.cancel_all(now);
     }
 
@@ -159,6 +175,20 @@ public:
     oms::OrderManager& orders() noexcept { return orders_; }
 
 private:
+    // Message time between cancel sweeps while halted. A sweep walks the working orders, so the
+    // interval keeps a refusing gateway from turning every message into a walk.
+    static constexpr Nanos kGapRetryNs = 100'000;
+
+    static Nanos saturating_add(Nanos a, Nanos b) noexcept { return a > ~Nanos{0} - b ? ~Nanos{0} : a + b; }
+
+    // One predictable branch when trading. Halted, the sweep is skipped unless orders are open
+    // and the interval has passed; the order manager skips orders whose cancel is in flight.
+    void retry_gap_cancels(Nanos now) noexcept {
+        if (trading_ || now < next_gap_retry_ || orders_.open_orders() == 0) return;
+        next_gap_retry_ = saturating_add(now, kGapRetryNs);
+        orders_.cancel_all(now);
+    }
+
     // What the strategy sees as its OrderApi. It forwards to the order manager (a final class,
     // so the forwarding calls are direct), counts outcomes, and refuses new exposure while the
     // engine is halted.
@@ -171,13 +201,19 @@ private:
             const oms::SubmitResult r = e_.orders_.submit(req, now);
             if (r.status == oms::SubmitStatus::ok) ++e_.stats_.orders_sent;
             if (r.status == oms::SubmitStatus::rejected_by_risk) ++e_.stats_.risk_rejects;
+            e_.count_refusal(r.status);
             return r;
         }
-        oms::SubmitStatus cancel(oms::OrderId id, Nanos now) override { return e_.orders_.cancel(id, now); }
+        oms::SubmitStatus cancel(oms::OrderId id, Nanos now) override {
+            const oms::SubmitStatus s = e_.orders_.cancel(id, now);
+            e_.count_refusal(s);
+            return s;
+        }
         oms::SubmitStatus replace(oms::OrderId id, Price px, Qty qty, Nanos now) override {
             if (!e_.trading_) return oms::SubmitStatus::bad_state;
             const oms::SubmitStatus s = e_.orders_.replace(id, px, qty, now);
             if (s == oms::SubmitStatus::rejected_by_risk) ++e_.stats_.risk_rejects;
+            e_.count_refusal(s);
             return s;
         }
         const oms::OrderInfo* find(oms::OrderId id) const override { return e_.orders_.find(id); }
@@ -258,6 +294,10 @@ private:
     void report(const ouch::Executed& m, Nanos now) noexcept { ++stats_.ouch_reports; orders_.on_executed(m, now); }
     void report(const ouch::Rejected& m, Nanos now) noexcept { ++stats_.ouch_reports; orders_.on_rejected(m, now); }
 
+    void count_refusal(oms::SubmitStatus s) noexcept {
+        if (s == oms::SubmitStatus::capacity || s == oms::SubmitStatus::gateway_busy) ++stats_.capacity_rejects;
+    }
+
     strategy::Context context(Nanos now) noexcept { return strategy::Context{now, books_, api_, risk_}; }
 
     // OrderListener. The order manager stamps every event with the `now` of the call that
@@ -282,6 +322,7 @@ private:
     Api api_;
     S strategy_;
     bool trading_{true};
+    Nanos next_gap_retry_{0};
     Stats stats_{};
 };
 

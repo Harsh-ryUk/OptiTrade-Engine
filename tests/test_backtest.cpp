@@ -230,7 +230,74 @@ OT_TEST(print_report_shows_signed_price_units_exactly) {
     OT_CHECK(s.find("realized pnl    50.0000\n") != std::string::npos);
     OT_CHECK(s.find("total pnl       -12.0345\n") != std::string::npos);
     OT_CHECK(s.find("digest          00000000deadbeef\n") != std::string::npos);
-    OT_CHECK(s.find("dropped") == std::string::npos);  // only shown when non-zero
+    OT_CHECK(s.find("dropped") == std::string::npos);  // the warnings are only shown when non-zero
+    OT_CHECK(s.find("capacity") == std::string::npos);
+    OT_CHECK(s.find("book errors") == std::string::npos);
+    OT_CHECK(s.find("skipped") == std::string::npos);
+
+    r.capacity_rejects = 4;
+    r.book_errors = 5;
+    r.itch_skipped = 6;
+    f = std::tmpfile();
+    OT_CHECK(f != nullptr);
+    if (f == nullptr) return;
+    replay::print_report(r, "unit", f);
+    std::rewind(f);
+    char text2[2048] = {};
+    const std::size_t got2 = std::fread(text2, 1, sizeof text2 - 1, f);
+    std::fclose(f);
+    const std::string t(text2, got2);
+    OT_CHECK(t.find("capacity rejects 4 ") != std::string::npos);
+    OT_CHECK(t.find("book errors     5 ") != std::string::npos);
+    OT_CHECK(t.find("itch skipped    6 ") != std::string::npos);
+}
+
+// A strategy that keeps one DAY order working and tries again on every update.
+struct OneAtATime {
+    std::uint64_t attempts{};
+    void on_book_update(Locate l, const strategy::Context& c) {
+        ++attempts;
+        c.orders.submit({l, Side::buy, kBid - 100'000, 1, oms::Tif::day}, c.now);
+    }
+    void on_fill(const oms::Fill&, const strategy::Context&) {}
+    void on_order_update(const oms::OrderInfo&, const strategy::Context&) {}
+};
+static_assert(strategy::Strategy<OneAtATime>);
+
+// Sizes that are too small degrade a run without any error. The report must say so.
+OT_TEST(undersized_tables_are_visible_in_the_report) {
+    Feed clean = scenario();
+    const replay::BacktestReport ok = run_scenario(clean, small_config());
+    OT_CHECK_EQ(ok.capacity_rejects, std::uint64_t{0});
+    OT_CHECK_EQ(ok.book_errors, std::uint64_t{0});
+    OT_CHECK_EQ(ok.itch_skipped, std::uint64_t{0});
+
+    // The order table holds one order and it never finishes: every later submit is refused.
+    replay::BacktestConfig tight = small_config();
+    tight.engine.oms.max_orders = 1;
+    Feed f = scenario();
+    f.src.rewind();
+    const replay::BacktestReport r = replay::run_backtest(f.src, tight, OneAtATime{});
+    OT_CHECK_EQ(r.orders_sent, std::uint64_t{1});
+    OT_CHECK(r.capacity_rejects >= 4);                     // five or six order-flow updates, one order fits
+    OT_CHECK_EQ(r.capacity_rejects + r.orders_sent, r.book_updates);
+
+    // Books that hold one order refuse the other adds (and the delete of an order they never took).
+    replay::BacktestConfig small_books = small_config();
+    small_books.engine.books.max_orders = 1;
+    small_books.sim.books = small_books.engine.books;
+    Feed g = scenario();
+    const replay::BacktestReport b = run_scenario(g, small_books);
+    OT_CHECK_EQ(b.book_errors, std::uint64_t{5});
+
+    // A message the decoder cannot read is counted, not silently dropped.
+    Feed h = scenario();
+    const std::array<std::byte, 1> junk{std::byte{'~'}};
+    h.src.add(300'000, junk);
+    const replay::BacktestReport j = run_scenario(h, small_config());
+    OT_CHECK_EQ(j.itch_skipped, std::uint64_t{1});
+    OT_CHECK_EQ(j.book_errors, std::uint64_t{0});
+    OT_CHECK_EQ(j.messages, ok.messages + 1);
 }
 
 OT_TEST(empty_source_gives_an_empty_report_and_the_fnv_offset_basis) {
@@ -451,6 +518,9 @@ void check_strategy_on_50k_messages() {
     OT_CHECK(r.fills > 0);
     OT_CHECK(r.volume >= r.fills);
     OT_CHECK_EQ(r.dropped_reports, std::uint64_t{0});
+    OT_CHECK_EQ(r.capacity_rejects, std::uint64_t{0});  // the sizes were enough: nothing degraded silently
+    OT_CHECK_EQ(r.book_errors, std::uint64_t{0});
+    OT_CHECK_EQ(r.itch_skipped, std::uint64_t{0});
     OT_CHECK_EQ(r.total_pnl, r.realized_pnl + r.unrealized_pnl);
     OT_CHECK(r.max_drawdown >= 0);
     OT_CHECK(inv.checks > 0);

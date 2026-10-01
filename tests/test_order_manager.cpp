@@ -200,12 +200,15 @@ ouch::Accepted acc(std::uint64_t token, OrderRef ref = 5000, char state = 'L') {
     a.order_state = state;
     return a;
 }
-ouch::Executed exe(std::uint64_t token, Qty shares, Price px, std::uint64_t match = 1) {
+// Match numbers identify an execution (the manager drops a repeat), so unless a test is about
+// repeats each call gets a fresh one.
+ouch::Executed exe(std::uint64_t token, Qty shares, Price px, std::uint64_t match = 0) {
+    static std::uint64_t fresh = 1'000'000;
     ouch::Executed x;
     x.token = tok(token);
     x.shares = shares;
     x.price = px;
-    x.match = match;
+    x.match = match != 0 ? match : ++fresh;
     return x;
 }
 ouch::Canceled can(std::uint64_t token, Qty dec, char reason = 'U') {
@@ -262,6 +265,7 @@ std::uint64_t fingerprint(const Rig& r) {
     d.update(r.om.open_orders());
     for (oms::OrderId id = 1; id <= n; ++id) {
         const oms::OrderInfo* i = r.om.find(id);
+        if (i == nullptr) continue;  // finished long ago and its slot was reused
         d.update(i->id);
         d.update(i->req.locate);
         d.update(static_cast<std::uint64_t>(i->req.side));
@@ -420,7 +424,10 @@ OT_TEST(submitted_order_survives_the_wire_round_trip) {
     OT_CHECK_EQ(grab.got.time_in_force, ouch::kTifIoc);
 }
 
-OT_TEST(capacity_is_per_session_and_checked_before_risk) {
+// Capacity is the number of orders that can work at the same time. A finished order gives its
+// slot back, ids keep counting, and capacity is still answered before the risk check (which
+// would otherwise spend rate budget on an order that cannot be recorded).
+OT_TEST(capacity_is_about_working_orders_and_checked_before_risk) {
     risk::Limits lim = wide();
     lim.max_orders_per_second = 4;
     Rig r(lim, 3);
@@ -435,12 +442,25 @@ OT_TEST(capacity_is_per_session_and_checked_before_risk) {
     OT_REJECT(r.risk.check(kAapl, Side::buy, kPx, 10, 0, 0), risk::Reject::none);
     OT_REJECT(r.risk.check(kAapl, Side::buy, kPx, 10, 0, 0), risk::Reject::rate_limit);
 
-    // Finished orders keep their slot: the table is a session log, ids are never reused.
+    // A finished order frees its slot; the next id is 4, never 1 again.
     r.om.on_accepted(acc(1), 1);
     r.om.on_executed(exe(1, 10, kPx), 2);
     OT_STATE(r.om, 1, "filled");
-    OT_SUBMIT(r.om.submit(req(kAapl, Side::buy, kPx, 10), 3).status, "capacity");
-    OT_CHECK(r.om.find(1) != nullptr);
+    OT_CHECK(r.om.find(1) != nullptr);  // still queryable until its slot is needed
+    // Same again without the rate limit, which is used up above.
+    lim.max_orders_per_second = 0;
+    Rig q(lim, 3);
+    for (int k = 0; k < 3; ++k) OT_SUBMIT(q.om.submit(req(kAapl, Side::buy, kPx, 10), 0).status, "ok");
+    q.om.on_accepted(acc(1), 1);
+    q.om.on_executed(exe(1, 10, kPx), 2);
+    const auto again = q.om.submit(req(kAapl, Side::buy, kPx, 10), 3);
+    OT_SUBMIT(again.status, "ok");
+    OT_CHECK_EQ(again.id, oms::OrderId{4});
+    OT_CHECK(q.om.find(1) == nullptr);   // the slot was reused
+    OT_CHECK(q.om.find(4) != nullptr);
+    OT_CHECK(q.om.find(2) != nullptr);
+    OT_CHECK_EQ(q.om.orders_submitted(), std::size_t{4});
+    OT_SUBMIT(q.om.submit(req(kAapl, Side::buy, kPx, 10), 4).status, "capacity");  // 2, 3, 4 work
 
     Rig none(wide(), 0);
     OT_SUBMIT(none.om.submit(req(kAapl, Side::buy, kPx, 10), 0).status, "capacity");
@@ -783,28 +803,91 @@ OT_TEST(fills_feed_position_and_realized_pnl_in_the_risk_engine) {
     OT_CHECK(r.lis.fills.back().side == Side::sell);
 }
 
-OT_TEST(executions_beyond_the_open_quantity_are_clamped) {
+// An Executed report is a fact. When it says more traded than the manager believed was open
+// (a replace raced a partial cancel, a confused exchange), the position still gets every share;
+// the order's size grows to what executed, and only the ledger release stops at what it holds.
+OT_TEST(executions_beyond_the_open_quantity_are_booked_in_full) {
     Rig r;
     live_order(r, Side::buy, kPx, 100);
-    r.om.on_executed(exe(1, 60, kPx, 1), 10);
-    r.om.on_executed(exe(1, 60, kPx, 2), 11);  // only 40 remain
+    r.om.on_executed(exe(1, 60, kPx), 10);
+    r.om.on_executed(exe(1, 60, kPx), 11);  // 60 more traded, but only 40 were believed open
     const oms::OrderInfo* i = r.om.find(1);
     OT_STATE(r.om, 1, "filled");
-    OT_CHECK_EQ(i->cum_qty, Qty{100});
+    OT_CHECK_EQ(i->cum_qty, Qty{120});
     OT_CHECK_EQ(i->leaves_qty, Qty{0});
+    OT_CHECK_EQ(i->req.qty, Qty{120});  // cum_qty <= req.qty always holds
     OT_CHECK_EQ(r.lis.fills.size(), std::size_t{2});
-    OT_CHECK_EQ(r.lis.fills[1].qty, Qty{40});
-    OT_CHECK_EQ(r.risk.position(kAapl).qty, std::int64_t{100});
-    OT_CHECK_EQ(r.risk.open_qty(kAapl, Side::buy), std::int64_t{0});
+    OT_CHECK_EQ(r.lis.fills[1].qty, Qty{60});
+    OT_CHECK_EQ(r.risk.position(kAapl).qty, std::int64_t{120});
+    OT_CHECK_EQ(r.risk.open_qty(kAapl, Side::buy), std::int64_t{0});  // the release never goes negative
+    OT_CHECK_EQ(r.risk.open_orders(), 0u);
     OT_CHECK_EQ(r.om.stats().clamped_reports, std::uint64_t{1});
 
     // A single oversize execution on a fresh order.
     live_order(r, Side::sell, kPx, 100);  // token 2
     r.om.on_executed(exe(2, 5000, kPx), 12);
     OT_STATE(r.om, 2, "filled");
-    OT_CHECK_EQ(r.om.find(2)->cum_qty, Qty{100});
-    OT_CHECK_EQ(r.risk.position(kAapl).qty, std::int64_t{0});
+    OT_CHECK_EQ(r.om.find(2)->cum_qty, Qty{5000});
+    OT_CHECK_EQ(r.om.find(2)->req.qty, Qty{5000});
+    OT_CHECK_EQ(r.risk.position(kAapl).qty, std::int64_t{120 - 5000});
+    OT_CHECK_EQ(r.risk.open_qty(kAapl, Side::sell), std::int64_t{0});
     OT_CHECK_EQ(r.om.stats().clamped_reports, std::uint64_t{2});
+
+    // Nothing beyond the largest order size can have traded: that is garbage, not a fact.
+    live_order(r, Side::buy, kPx, 100);  // token 3
+    const std::uint64_t before = fingerprint(r);
+    r.om.on_executed(exe(3, kMaxOrderQty + 1, kPx), 13);
+    OT_CHECK_EQ(fingerprint(r), before);
+    OT_CHECK_EQ(r.om.stats().invalid_reports, std::uint64_t{1});
+}
+
+// Retransmits: the same match number on the same order is one execution, not two.
+OT_TEST(a_repeated_execution_is_dropped_and_counted) {
+    Rig r;
+    live_order(r, Side::buy, kPx, 1000);
+    r.om.on_executed(exe(1, 300, kPx, 77), 10);
+    const std::uint64_t before = fingerprint(r);
+    r.om.on_executed(exe(1, 300, kPx, 77), 11);
+    OT_CHECK_EQ(fingerprint(r), before);
+    OT_CHECK_EQ(r.om.stats().invalid_reports, std::uint64_t{1});
+    OT_CHECK_EQ(r.om.find(1)->cum_qty, Qty{300});
+    OT_CHECK_EQ(r.risk.position(kAapl).qty, std::int64_t{300});
+    OT_CHECK_EQ(r.lis.fills.size(), std::size_t{1});
+
+    // The exchange then cancels the true remainder and the order ends with the right numbers.
+    OT_SUBMIT(r.om.cancel(1, 12), "ok");
+    r.om.on_canceled(can(1, 700), 13);
+    OT_STATE(r.om, 1, "canceled");
+    OT_CHECK_EQ(r.risk.position(kAapl).qty, std::int64_t{300});
+    OT_CHECK_EQ(r.risk.open_qty(kAapl, Side::buy), std::int64_t{0});
+
+    // A different match number with identical content is a second execution.
+    live_order(r, Side::buy, kPx, 1000);  // token 2
+    r.om.on_executed(exe(2, 10, kPx, 5), 20);
+    r.om.on_executed(exe(2, 10, kPx, 6), 21);
+    OT_CHECK_EQ(r.om.find(2)->cum_qty, Qty{20});
+    // Match numbers are per order: another order may see the same one.
+    live_order(r, Side::buy, kPx, 1000);  // token 3
+    r.om.on_executed(exe(3, 10, kPx, 5), 22);
+    OT_CHECK_EQ(r.om.find(3)->cum_qty, Qty{10});
+}
+
+// The memory is a small window per order, not an unbounded set: repeats of a long-gone
+// execution are not recognised (documented limit) but the most recent ones always are.
+OT_TEST(the_repeat_window_covers_the_most_recent_executions_of_an_order) {
+    Rig r;
+    const oms::OrderId id = live_order(r, Side::buy, kPx, 100'000);
+    constexpr std::uint64_t kN = oms::OrderManager::kMatchMemory;
+    for (std::uint64_t m = 1; m <= 3 * kN; ++m) r.om.on_executed(exe(1, 1, kPx, m), 10 + m);
+    OT_CHECK_EQ(r.om.find(id)->cum_qty, Qty{3 * kN});
+    // Every one of the last kN is recognised as a repeat.
+    for (std::uint64_t m = 2 * kN + 1; m <= 3 * kN; ++m) r.om.on_executed(exe(1, 1, kPx, m), 100);
+    OT_CHECK_EQ(r.om.find(id)->cum_qty, Qty{3 * kN});
+    OT_CHECK_EQ(r.om.stats().invalid_reports, kN);
+    // A malformed report is not remembered: the same match can still arrive correctly.
+    r.om.on_executed(exe(1, 0, kPx, 9999), 101);
+    r.om.on_executed(exe(1, 1, kPx, 9999), 102);
+    OT_CHECK_EQ(r.om.find(id)->cum_qty, Qty{3 * kN + 1});
 }
 
 OT_TEST(malformed_executions_are_dropped) {
@@ -1577,12 +1660,433 @@ OT_TEST(listener_may_act_on_the_order_from_inside_a_callback) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Regressions found by review: open-order count, races, repeats, amend limits, rate budget,
+// capacity, risk-reducing orders
+// ---------------------------------------------------------------------------------------------
+
+// A far order rests for good while another is sent and cancelled over and over. The count of
+// working orders must stay at one (it used to creep up by one per cycle until max_open_orders
+// refused everything).
+OT_TEST(cancel_and_resubmit_cycles_do_not_inflate_the_open_order_count) {
+    risk::Limits l = wide();
+    l.max_open_orders = 10;
+    Rig r(l, 64);
+    live_order(r, Side::buy, kPx, 100);  // token 1, rests forever
+    for (int k = 0; k < 200; ++k) {
+        const auto res = r.om.submit(req(kAapl, Side::buy, kPx, 100), 10 + k);
+        OT_SUBMIT(res.status, "ok");
+        if (res.status != oms::SubmitStatus::ok) return;
+        const std::uint64_t t = token_id(r.gw.enters.back().token);
+        r.om.on_accepted(acc(t), 11 + k);
+        OT_SUBMIT(r.om.cancel(res.id, 12 + k), "ok");
+        OT_CHECK_EQ(r.risk.open_orders(), 2u);
+        r.om.on_canceled(can(t, 100), 13 + k);
+        OT_CHECK_EQ(r.risk.open_orders(), 1u);
+        OT_CHECK_EQ(r.risk.open_qty(kAapl, Side::buy), std::int64_t{100});
+    }
+}
+
+// Every way an order can end takes exactly one off the count, however much of it was filled,
+// cancelled or amended before.
+OT_TEST(open_order_count_is_exact_through_every_way_an_order_ends) {
+    Rig r(wide(), 64);
+    live_order(r, Side::buy, kPx, 100);   // 1: several orders on one side, so the count is not
+    live_order(r, Side::buy, kPx, 100);   // 2: derivable from the quantity
+    live_order(r, Side::buy, kPx, 100);   // 3
+    live_order(r, Side::buy, kPx, 100);   // 4
+    live_order(r, Side::buy, kPx, 100);   // 5
+    OT_CHECK_EQ(r.risk.open_orders(), 5u);
+
+    r.om.on_executed(exe(1, 40, kPx), 10);               // partial fill: still working
+    r.om.on_canceled(can(2, 30), 10);                    // partial cancel: still working
+    OT_CHECK_EQ(r.risk.open_orders(), 5u);
+    r.om.on_executed(exe(1, 60, kPx), 11);               // 1 filled
+    OT_CHECK_EQ(r.risk.open_orders(), 4u);
+    r.om.on_canceled(can(2, 70), 12);                    // 2 cancelled
+    OT_CHECK_EQ(r.risk.open_orders(), 3u);
+    r.om.on_accepted(acc(99), 12);                       // unknown token: nothing
+    OT_SUBMIT(r.om.replace(3, kPx, 250, 13), "ok");      // growth in flight: still one order
+    OT_CHECK_EQ(r.risk.open_orders(), 3u);
+    r.om.on_replaced(rpl(3, token_id(r.gw.replaces.back().replacement), 250, kPx), 14);
+    OT_CHECK_EQ(r.risk.open_orders(), 3u);
+    r.om.on_canceled(can(token_id(r.gw.replaces.back().replacement), 250), 15);  // 3 cancelled
+    OT_CHECK_EQ(r.risk.open_orders(), 2u);
+    r.om.on_accepted(acc(4, 1, 'D'), 16);                // 4 was accepted already: dropped
+    OT_CHECK_EQ(r.risk.open_orders(), 2u);
+    const auto dead = r.om.submit(req(kAapl, Side::buy, kPx, 10), 17);  // 6, dies on arrival
+    r.om.on_accepted(acc(token_id(r.gw.enters.back().token), 1, 'D'), 18);
+    OT_STATE(r.om, dead.id, "canceled");
+    OT_CHECK_EQ(r.risk.open_orders(), 2u);
+    const auto bad = r.om.submit(req(kAapl, Side::buy, kPx, 10), 19);   // 7, refused
+    r.om.on_rejected(rej(token_id(r.gw.enters.back().token)), 20);
+    OT_STATE(r.om, bad.id, "rejected");
+    OT_CHECK_EQ(r.risk.open_orders(), 2u);
+    OT_CHECK_EQ(r.om.open_orders(), std::size_t{2});
+    // The two left are 4 and 5, with all their quantity.
+    OT_CHECK_EQ(r.risk.open_qty(kAapl, Side::buy), std::int64_t{200});
+}
+
+// The exchange reopens (total - executed) on a replace even when a partial cancel shrank the
+// order first. That is a fact about the exchange's book: the OMS follows it, and the executions
+// that then arrive all reach the position.
+OT_TEST(replace_racing_a_partial_cancel_keeps_every_later_fill) {
+    Rig r(wide(), 64);
+    const oms::OrderId id = live_order(r, Side::buy, kPx, 100);  // token 1
+    OT_SUBMIT(r.om.replace(id, kPx, 95, 3), "ok");               // shrink, token 2 in flight
+    r.om.on_canceled(can(1, 71), 4);                             // before the exchange saw it
+    OT_CHECK_EQ(r.om.find(id)->leaves_qty, Qty{29});
+    // The ledger still covers what the replace may reopen: 95 - 0.
+    OT_CHECK_EQ(r.om.reserved_qty(id), Qty{95});
+    OT_CHECK_EQ(r.risk.open_qty(kAapl, Side::buy), std::int64_t{95});
+
+    r.om.on_replaced(rpl(1, 2, 95, kPx), 5);                     // exchange: open = 95
+    OT_STATE(r.om, id, "live");
+    OT_CHECK_EQ(r.om.find(id)->leaves_qty, Qty{95});
+    OT_CHECK_EQ(r.om.reserved_qty(id), Qty{95});
+    OT_CHECK_EQ(r.risk.open_qty(kAapl, Side::buy), std::int64_t{95});
+    OT_CHECK_EQ(r.risk.open_orders(), 1u);
+
+    r.om.on_executed(exe(2, 60, kPx), 6);
+    r.om.on_executed(exe(2, 35, kPx), 7);
+    OT_STATE(r.om, id, "filled");
+    OT_CHECK_EQ(r.om.find(id)->cum_qty, Qty{95});
+    OT_CHECK_EQ(r.risk.position(kAapl).qty, std::int64_t{95});
+    OT_CHECK_EQ(r.risk.open_qty(kAapl, Side::buy), std::int64_t{0});
+    OT_CHECK_EQ(r.risk.open_orders(), 0u);
+    OT_CHECK_EQ(r.om.stats().clamped_reports, std::uint64_t{0});
+    OT_CHECK_EQ(r.om.stats().invalid_reports, std::uint64_t{0});
+}
+
+// Same race with a growing replace, and with a cancel that empties the order while the replace
+// is in flight (the replace then finds nothing and the exchange refuses it).
+OT_TEST(replace_races_keep_the_ledger_on_the_exchanges_numbers) {
+    {   // grow 100 -> 150, exchange partial-cancels 40 first, then reopens 150
+        Rig r;
+        const oms::OrderId id = live_order(r, Side::buy, kPx, 100);
+        OT_SUBMIT(r.om.replace(id, kPx, 150, 3), "ok");
+        OT_CHECK_EQ(r.risk.open_qty(kAapl, Side::buy), std::int64_t{150});
+        r.om.on_canceled(can(1, 40), 4);
+        OT_CHECK_EQ(r.risk.open_qty(kAapl, Side::buy), std::int64_t{150});  // floor: the reopen
+        r.om.on_replaced(rpl(1, 2, 150, kPx), 5);
+        OT_CHECK_EQ(r.om.find(id)->leaves_qty, Qty{150});
+        OT_CHECK_EQ(r.risk.open_qty(kAapl, Side::buy), std::int64_t{150});
+    }
+    {   // the replace is refused after a partial cancel: only what really stays open is held
+        Rig r;
+        const oms::OrderId id = live_order(r, Side::buy, kPx, 100);
+        OT_SUBMIT(r.om.replace(id, kPx, 150, 3), "ok");
+        r.om.on_canceled(can(1, 40), 4);
+        r.om.on_rejected(rej(2), 5);
+        OT_STATE(r.om, id, "live");
+        OT_CHECK_EQ(r.om.find(id)->leaves_qty, Qty{60});
+        OT_CHECK_EQ(r.om.reserved_qty(id), Qty{60});
+        OT_CHECK_EQ(r.risk.open_qty(kAapl, Side::buy), std::int64_t{60});
+    }
+    {   // fills during the flight reduce the floor too
+        Rig r;
+        const oms::OrderId id = live_order(r, Side::buy, kPx, 100);
+        OT_SUBMIT(r.om.replace(id, kPx, 150, 3), "ok");
+        r.om.on_executed(exe(1, 30, kPx), 4);
+        OT_CHECK_EQ(r.om.reserved_qty(id), Qty{120});  // 150 - 30
+        OT_CHECK_EQ(r.risk.open_qty(kAapl, Side::buy), std::int64_t{120});
+        r.om.on_replaced(rpl(1, 2, 120, kPx), 5);
+        OT_CHECK_EQ(r.risk.open_qty(kAapl, Side::buy), std::int64_t{120});
+        OT_CHECK_EQ(r.risk.position(kAapl).qty, std::int64_t{30});
+    }
+    {   // the order is emptied while the replace is in flight
+        Rig r;
+        const oms::OrderId id = live_order(r, Side::buy, kPx, 100);
+        OT_SUBMIT(r.om.replace(id, kPx, 150, 3), "ok");
+        r.om.on_canceled(can(1, 100), 4);
+        OT_STATE(r.om, id, "canceled");
+        OT_CHECK_EQ(r.risk.open_qty(kAapl, Side::buy), std::int64_t{0});
+        OT_CHECK_EQ(r.risk.open_orders(), 0u);
+        r.om.on_rejected(rej(2), 5);  // the exchange refuses the replace of a dead order
+        OT_CHECK_EQ(r.risk.open_qty(kAapl, Side::buy), std::int64_t{0});
+    }
+}
+
+// A replace is judged on the new open quantity and price, not only on the added shares. One
+// limit per rig, so each check can only be refused by the limit it is about.
+OT_TEST(replace_cannot_bypass_the_size_limit) {
+    risk::Limits l = wide();
+    l.max_order_qty = 1000;
+    Rig r(l);
+    const oms::OrderId id = live_order(r, Side::buy, kPx, 1000);  // token 1
+    const std::uint64_t before = fingerprint(r);
+    // Growth of 500 fits max_order_qty on its own; the new open quantity 1500 does not.
+    OT_SUBMIT(r.om.replace(id, kPx, 1500, 10), "rejected_by_risk");
+    // Nor does a replace that adds nothing get to exceed it: 1001 only after executions.
+    OT_SUBMIT(r.om.replace(id, kPx, 1001, 11), "rejected_by_risk");
+    OT_CHECK_EQ(fingerprint(r), before);
+    OT_CHECK_EQ(r.gw.replaces.size(), std::size_t{0});
+    OT_SUBMIT(r.om.replace(id, kPx, 1000, 12), "ok");
+    r.om.on_replaced(rpl(1, 2, 1000, kPx), 13);
+    // The size limit sees what is open after the executions: 1400 total, 400 done, 1000 open.
+    r.om.on_executed(exe(2, 400, kPx), 14);
+    OT_SUBMIT(r.om.replace(id, kPx, 1400, 15), "ok");
+    OT_CHECK_EQ(r.gw.replaces.size(), std::size_t{2});
+}
+
+OT_TEST(replace_cannot_bypass_the_notional_limit) {
+    risk::Limits l = wide();
+    l.max_order_notional = 1000 * kPx;  // 1000 shares at 100.0000
+    Rig r(l);
+    const oms::OrderId id = live_order(r, Side::buy, kPx, 1000);
+    const std::uint64_t before = fingerprint(r);
+    OT_SUBMIT(r.om.replace(id, kPx + 1, 1000, 10), "rejected_by_risk");  // no growth, dearer
+    OT_SUBMIT(r.om.replace(id, kPx, 1001, 11), "rejected_by_risk");      // growth
+    OT_CHECK_EQ(fingerprint(r), before);
+    OT_SUBMIT(r.om.replace(id, kPx + 1000, 990, 12), "ok");              // 990 * 100.1 is under
+    OT_CHECK_EQ(r.gw.replaces.size(), std::size_t{1});
+}
+
+OT_TEST(replace_cannot_bypass_the_price_band) {
+    risk::Limits l = wide();
+    l.price_band_bps = 100;  // 1 %
+    Rig r(l);
+    r.ref.px[kAapl] = kPx;
+    const oms::OrderId id = live_order(r, Side::buy, kPx, 100);
+    const std::uint64_t before = fingerprint(r);
+    OT_SUBMIT(r.om.replace(id, 1'020'000, 100, 10), "rejected_by_risk");  // re-price only
+    OT_SUBMIT(r.om.replace(id, 1'020'000, 50, 11), "rejected_by_risk");   // shrink and re-price
+    OT_CHECK_EQ(fingerprint(r), before);
+    OT_SUBMIT(r.om.replace(id, 1'010'000, 50, 12), "ok");                 // exactly at the band
+}
+
+// Amending while the book is halted or full: only what adds exposure is refused.
+OT_TEST(replace_that_adds_nothing_is_exempt_from_kill_switch_rate_and_open_order_limits) {
+    risk::Limits l = wide();
+    l.max_orders_per_second = 2;
+    l.max_open_orders = 1;
+    Rig r(l);
+    const oms::OrderId id = live_order(r, Side::buy, kPx, 100);  // admission 1 of 2, open 1 of 1
+    // A growing replace is not a new order: it is not refused for max_open_orders, but it does
+    // spend rate budget (admission 2).
+    OT_SUBMIT(r.om.replace(id, kPx, 120, 10), "ok");
+    r.om.on_replaced(rpl(1, 2, 120, kPx), 11);
+    OT_REJECT(r.risk.check(kAapl, Side::buy, kPx, 1, 0, 12), risk::Reject::rate_limit);
+    // A shrink or re-price adds nothing: no budget, no kill switch.
+    r.risk.set_kill_switch(true);
+    OT_SUBMIT(r.om.replace(id, kPx + 1000, 110, 13), "ok");
+    r.om.on_replaced(rpl(2, 3, 110, kPx + 1000), 14);
+    OT_SUBMIT(r.om.replace(id, kPx, 110, 15), "ok");
+    // ...but growing is refused by the kill switch.
+    r.om.on_replaced(rpl(3, 4, 110, kPx), 16);
+    OT_SUBMIT(r.om.replace(id, kPx, 111, 17), "rejected_by_risk");
+}
+
+// The gateway refusing a message after the risk verdict must not cost rate budget.
+OT_TEST(a_send_the_gateway_refuses_does_not_spend_rate_budget) {
+    risk::Limits l = wide();
+    l.max_orders_per_second = 2;
+    Rig r(l);
+    r.gw.set_open(false);
+    for (int k = 0; k < 10; ++k) {
+        OT_SUBMIT(r.om.submit(req(kAapl, Side::buy, kPx, 1), 100 + k).status, "gateway_busy");
+    }
+    r.gw.set_open(true);
+    OT_SUBMIT(r.om.submit(req(kAapl, Side::buy, kPx, 1), 200).status, "ok");
+    OT_SUBMIT(r.om.submit(req(kAapl, Side::buy, kPx, 1), 201).status, "ok");
+    OT_SUBMIT(r.om.submit(req(kAapl, Side::buy, kPx, 1), 202).status, "rejected_by_risk");  // now it is full
+
+    // A growing replace the gateway refuses is free too.
+    Rig q(l);
+    const oms::OrderId id = live_order(q, Side::buy, kPx, 10);  // admission 1 of 2
+    q.gw.set_open(false);
+    for (int k = 0; k < 10; ++k) OT_SUBMIT(q.om.replace(id, kPx, 20, 300 + k), "gateway_busy");
+    q.gw.set_open(true);
+    OT_SUBMIT(q.om.replace(id, kPx, 20, 400), "ok");  // admission 2 of 2
+    OT_REJECT(q.risk.check(kAapl, Side::buy, kPx, 1, 0, 401), risk::Reject::rate_limit);
+}
+
+// Finished orders give their slots back. The table is sized for 4 working orders here but many
+// thousands pass through it.
+OT_TEST(finished_orders_give_their_slots_back) {
+    Rig r(wide(), 4);
+    std::uint64_t token = 0;
+    for (oms::OrderId k = 1; k <= 5000; ++k) {
+        const auto res = r.om.submit(req(kAapl, Side::buy, kPx, 10), k);
+        OT_SUBMIT(res.status, "ok");
+        if (res.status != oms::SubmitStatus::ok) return;
+        OT_CHECK_EQ(res.id, k);  // ids keep counting and are never reused
+        const std::uint64_t t = token_id(r.gw.enters.back().token);
+        OT_CHECK(t > token);  // nor are tokens
+        token = t;
+        r.om.on_accepted(acc(t), k);
+        r.om.on_executed(exe(t, 10, kPx), k);
+        OT_STATE(r.om, k, "filled");
+    }
+    OT_CHECK_EQ(r.om.orders_submitted(), std::size_t{5000});
+    OT_CHECK_EQ(r.risk.position(kAapl).qty, std::int64_t{50'000});
+    OT_CHECK_EQ(r.risk.open_orders(), 0u);
+    OT_CHECK(r.om.find(1) == nullptr);       // long gone
+    OT_CHECK(r.om.find(5000) != nullptr);    // the newest finished orders are kept
+    OT_CHECK(r.om.find(4997) != nullptr);
+    OT_CHECK(r.om.find(5001) == nullptr);
+}
+
+// The default table (65536 slots) used to answer `capacity` for good after that many orders.
+OT_TEST(default_capacity_is_not_a_lifetime_limit) {
+    Rig r(wide(), oms::OrderManager::Config{}.max_orders, false);
+    const std::size_t total = oms::OrderManager::Config{}.max_orders + 5000;
+    for (std::size_t k = 1; k <= total; ++k) {
+        const auto res = r.om.submit(req(kAapl, Side::buy, kPx, 1), k);
+        if (res.status != oms::SubmitStatus::ok) {
+            OT_SUBMIT(res.status, "ok");
+            return;
+        }
+        const std::uint64_t t = token_id(r.gw.enters.back().token);
+        r.om.on_accepted(acc(t), k);
+        r.om.on_executed(exe(t, 1, kPx), k);
+    }
+    OT_CHECK_EQ(r.risk.position(kAapl).qty, static_cast<std::int64_t>(total));
+}
+
+// A slot is taken from the oldest finished order; working orders are never recycled, however
+// old, and a recycled order is gone for every purpose.
+OT_TEST(recycling_takes_the_oldest_finished_order_and_never_a_working_one) {
+    Rig r(wide(), 3);
+    const oms::OrderId a = live_order(r, Side::buy, kPx, 10);   // id 1 token 1: rests forever
+    const oms::OrderId b = live_order(r, Side::buy, kPx, 10);   // id 2 token 2
+    const oms::OrderId c = live_order(r, Side::buy, kPx, 10);   // id 3 token 3
+    OT_SUBMIT(r.om.submit(req(kAapl, Side::buy, kPx, 10), 50).status, "capacity");
+    r.om.on_executed(exe(3, 10, kPx), 51);                       // c finishes first
+    r.om.on_executed(exe(2, 10, kPx), 52);                       // then b
+    OT_CHECK(r.om.find(b) != nullptr && r.om.find(c) != nullptr);
+
+    const auto d = r.om.submit(req(kAapl, Side::sell, kPx + 5, 7), 53);  // takes c's slot
+    OT_SUBMIT(d.status, "ok");
+    OT_CHECK_EQ(d.id, oms::OrderId{4});
+    OT_CHECK(r.om.find(c) == nullptr);
+    OT_CHECK(r.om.find(b) != nullptr);
+    OT_CHECK(r.om.find(a) != nullptr);
+    const oms::OrderInfo* di = r.om.find(d.id);
+    OT_CHECK(di != nullptr && di->req.side == Side::sell && di->req.qty == 7 && di->cum_qty == 0);
+    OT_CHECK(di != nullptr && di->id == 4 && di->status == oms::OrderStatus::pending_new);
+    OT_CHECK(r.gw.enters.back().token == tok(4));
+
+    // The recycled order: every call answers unknown, every late report is counted unknown and
+    // changes nothing, in particular not the order that now owns the slot.
+    OT_SUBMIT(r.om.cancel(c, 60), "unknown_order");
+    OT_SUBMIT(r.om.replace(c, kPx, 20, 60), "unknown_order");
+    OT_CHECK_EQ(r.om.reserved_qty(c), Qty{0});
+    const std::uint64_t before = fingerprint(r);
+    const std::uint64_t unknown = r.om.stats().unknown_tokens;
+    r.om.on_executed(exe(3, 10, kPx), 61);
+    r.om.on_canceled(can(3, 10), 61);
+    r.om.on_accepted(acc(3), 61);
+    r.om.on_rejected(rej(3), 61);
+    r.om.on_replaced(rpl(3, 99, 10, kPx), 61);
+    OT_CHECK_EQ(r.om.stats().unknown_tokens, unknown + 5);
+    OT_CHECK_EQ(fingerprint(r), before);
+    // b is finished but still tabled: its late reports are "late", not "unknown".
+    r.om.on_executed(exe(2, 10, kPx), 62);
+    OT_CHECK_EQ(r.om.stats().late_reports, std::uint64_t{1});
+
+    // The working order is untouched by all of this and is cancelled in id order with the rest.
+    OT_CHECK_EQ(r.om.cancel_all(70), std::size_t{2});  // ids 1 and 4; b is finished
+    OT_CHECK(r.gw.cancels.size() == 2 && r.gw.cancels[0].token == tok(1) && r.gw.cancels[1].token == tok(4));
+    r.om.on_canceled(can(4, 7), 71);
+    r.om.on_canceled(can(1, 10), 71);
+    OT_CHECK_EQ(r.risk.open_orders(), 0u);
+    OT_CHECK_EQ(r.risk.open_qty(kAapl, Side::buy), std::int64_t{0});
+    OT_CHECK_EQ(r.risk.open_qty(kAapl, Side::sell), std::int64_t{0});
+}
+
+// The token table keeps up with recycling: it never fills with the tokens of forgotten orders,
+// replacements included.
+OT_TEST(token_table_survives_recycling_with_replaces) {
+    Rig r(wide(), 4);
+    for (oms::OrderId k = 1; k <= 3000; ++k) {
+        OT_SUBMIT(r.om.submit(req(kAapl, Side::buy, kPx, 10), k).status, "ok");
+        const std::uint64_t t = token_id(r.gw.enters.back().token);
+        r.om.on_accepted(acc(t), k);
+        OT_SUBMIT(r.om.replace(k, kPx, 12, k), "ok");
+        const std::uint64_t t2 = token_id(r.gw.replaces.back().replacement);
+        r.om.on_replaced(rpl(t, t2, 12, kPx), k);
+        OT_SUBMIT(r.om.replace(k, kPx, 9, k), "ok");  // left in flight, then the order ends
+        r.om.on_executed(exe(t2, 12, kPx), k);
+        OT_STATE(r.om, k, "filled");
+    }
+    OT_CHECK_EQ(r.risk.open_orders(), 0u);
+    OT_CHECK_EQ(r.risk.open_qty(kAapl, Side::buy), std::int64_t{0});
+    OT_CHECK_EQ(r.risk.position(kAapl).qty, std::int64_t{3000 * 12});
+}
+
+OT_TEST(first_token_is_configurable) {
+    RecordingGateway gw;
+    FakeReference ref;
+    FakeSymbols syms;
+    RecordingListener lis;
+    risk::RiskEngine risk(wide(), 8);
+    oms::OrderManager::Config c;
+    c.max_orders = 8;
+    c.first_token = 500;
+    oms::OrderManager om(c, gw, risk, ref, syms, &lis);
+    const auto a = om.submit(req(kAapl, Side::buy, kPx, 10), 1);
+    OT_SUBMIT(a.status, "ok");
+    OT_CHECK_EQ(a.id, oms::OrderId{1});  // ids are independent of tokens
+    OT_CHECK(gw.enters[0].token == tok(500));
+    om.on_accepted(acc(1), 2);  // the old numbering is a stranger now
+    OT_CHECK_EQ(om.stats().unknown_tokens, std::uint64_t{1});
+    om.on_accepted(acc(500), 3);
+    OT_STATE(om, 1, "live");
+    OT_SUBMIT(om.replace(1, kPx, 20, 4), "ok");
+    OT_CHECK(gw.replaces[0].replacement == tok(501));
+
+    // 0 is not a usable start; the default is 1.
+    oms::OrderManager::Config z;
+    z.first_token = 0;
+    OT_CHECK_EQ(oms::OrderManager::Config{}.first_token, std::uint64_t{1});
+    RecordingGateway gw2;
+    oms::OrderManager om2(z, gw2, risk, ref, syms, nullptr);
+    OT_SUBMIT(om2.submit(req(kAapl, Side::buy, kPx, 1), 1).status, "ok");
+    OT_CHECK(gw2.enters[0].token == tok(1));
+}
+
+// Orders that shrink an over-limit position are not blocked by the position limit.
+OT_TEST(orders_that_reduce_an_over_limit_position_are_allowed) {
+    risk::Limits l = wide();
+    l.max_position = 100;
+    Rig r(l);
+    r.risk.on_fill(kAapl, Side::buy, 150, kPx);  // fills landed beyond the cap
+    OT_SUBMIT(r.om.submit(req(kAapl, Side::sell, kPx, 40), 1).status, "ok");
+    const auto more = r.om.submit(req(kAapl, Side::buy, kPx, 1), 2);
+    OT_SUBMIT(more.status, "rejected_by_risk");
+    OT_REJECT(more.risk_reason, risk::Reject::position);
+}
+
+// A listener that submits from on_fill of a fill that finished its order may be handed that
+// order's slot. The update that follows must still describe the finished order.
+OT_TEST(a_submit_from_the_fill_callback_may_take_the_slot_of_the_order_that_just_finished) {
+    Rig r(wide(), 1);
+    live_order(r, Side::buy, kPx, 10);
+    r.lis.on_fill_hook = [&](const oms::Fill&) {
+        r.lis.on_fill_hook = nullptr;
+        OT_SUBMIT(r.om.submit(req(kAapl, Side::sell, kPx, 5), 200).status, "ok");
+    };
+    r.om.on_executed(exe(1, 10, kPx), 100);
+    OT_CHECK(r.om.find(1) == nullptr);  // its slot now belongs to order 2
+    OT_STATE(r.om, 2, "pending_new");
+    OT_CHECK_EQ(r.om.find(2)->req.qty, Qty{5});
+    OT_CHECK(!r.lis.updates.empty());
+    OT_CHECK_EQ(r.lis.updates.back().id, oms::OrderId{1});
+    OT_CHECK_EQ(std::string_view(name(r.lis.updates.back().status)), std::string_view("filled"));
+    OT_CHECK_EQ(r.lis.updates.back().cum_qty, Qty{10});
+    OT_CHECK_EQ(r.risk.position(kAapl).qty, std::int64_t{10});
+    OT_CHECK_EQ(r.risk.open_qty(kAapl, Side::sell), std::int64_t{5});
+    OT_CHECK_EQ(r.risk.open_qty(kAapl, Side::buy), std::int64_t{0});
+    OT_CHECK_EQ(r.risk.open_orders(), 1u);
+}
+
+// ---------------------------------------------------------------------------------------------
 // Randomized play
 // ---------------------------------------------------------------------------------------------
 
 namespace {
 
-constexpr std::size_t kRandomOrders = 250;
+constexpr std::size_t kRandomOrders = 12;  // small, so finished slots are recycled again and again
 
 // Coverage of the random play: each entry counts how often a situation was reached, so the test
 // can insist that every path it is meant to exercise really was exercised.
@@ -1595,7 +2099,7 @@ enum Hit : std::size_t {
     h_exec_before_ack, h_cancel_report, h_cancel_partial, h_cancel_full, h_replaced,
     h_replaced_dead, h_replaced_cut, h_replaced_while_cancelling, h_replace_rejected,
     h_illegal_0, h_illegal_1, h_illegal_2, h_illegal_3, h_illegal_4, h_illegal_5, h_illegal_6,
-    h_illegal_7, h_illegal_8, h_illegal_9, h_count
+    h_illegal_7, h_illegal_8, h_illegal_9, h_illegal_10, h_count
 };
 constexpr const char* kHitNames[h_count] = {
     "submit ok", "submit risk", "submit busy", "submit invalid", "submit capacity",
@@ -1607,7 +2111,8 @@ constexpr const char* kHitNames[h_count] = {
     "replaced", "replaced dead", "replaced cut", "replaced while cancelling", "replace rejected",
     "illegal unknown token", "illegal spelling", "illegal late", "illegal second accepted",
     "illegal reject of held order", "illegal execution", "illegal zero cancel",
-    "illegal accepted state", "illegal replaced", "illegal on replacement token"};
+    "illegal accepted state", "illegal replaced", "illegal on replacement token",
+    "illegal repeated execution"};
 
 // Drives one manager with a stream of random calls and reports, checking the ledger invariants
 // after every step. `allow_growth` = false confines replaces to sizes the order already holds, so
@@ -1644,6 +2149,9 @@ private:
         Price pend_px{};
         bool accepted{};
         bool acked{};
+        std::uint64_t last_match{};  // the last execution booked, to replay it as a duplicate
+        Qty last_shares{};
+        Price last_px{};
     };
     struct Tally {  // fills as the listener saw them
         std::int64_t qty{};
@@ -1661,7 +2169,8 @@ private:
     void hit(Hit h) { ++hits_[h]; }
 
     oms::OrderManager& om() { return rig_.om; }
-    const oms::OrderInfo& info(oms::OrderId id) { return *rig_.om.find(id); }
+    const oms::OrderInfo& info(oms::OrderId id) { return *rig_.om.find(id); }  // id must be tabled
+    bool tabled(oms::OrderId id) { return rig_.om.find(id) != nullptr; }
     Shadow& shadow(oms::OrderId id) {
         if (shadow_.size() <= id) shadow_.resize(id + 1);
         return shadow_[id];
@@ -1675,7 +2184,8 @@ private:
         if (n == 0) return 0;
         for (int tries = 0; tries < 12; ++tries) {
             const oms::OrderId id = 1 + rng_.bounded(n);
-            const bool open = !oms::is_terminal(info(id).status);
+            // An order whose slot was reused counts as finished (its id is gone, not its token).
+            const bool open = tabled(id) && !oms::is_terminal(info(id).status);
             if (want_open < 0 || open == (want_open == 1)) return id;
         }
         return 0;
@@ -1704,6 +2214,7 @@ private:
     void do_submit() {
         const std::uint64_t before = fingerprint(rig_);
         const std::size_t n = om().orders_submitted();
+        const bool table_full = om().open_orders() == kRandomOrders;  // every slot holds a working order
         oms::OrderRequest q = req(static_cast<Locate>(1 + rng_.bounded(3)),
                                   rng_.chance(1, 2) ? Side::buy : Side::sell, random_price(),
                                   static_cast<Qty>(1 + rng_.bounded(220)),
@@ -1745,8 +2256,9 @@ private:
             OT_CHECK_EQ(res.id, oms::OrderId{0});
             OT_CHECK_EQ(fingerprint(rig_), before);
             if (malformed) OT_SUBMIT(res.status, "invalid_request");
-            if (!malformed && n == kRandomOrders) OT_SUBMIT(res.status, "capacity");
-            if (!malformed && n < kRandomOrders && !gw_open_ && res.status != oms::SubmitStatus::gateway_busy) {
+            if (!malformed && table_full) OT_SUBMIT(res.status, "capacity");
+            if (!malformed && !table_full) OT_CHECK(res.status != oms::SubmitStatus::capacity);
+            if (!malformed && !table_full && !gw_open_ && res.status != oms::SubmitStatus::gateway_busy) {
                 OT_SUBMIT(res.status, "rejected_by_risk");
             }
         }
@@ -1840,6 +2352,7 @@ private:
     void do_cancel_all() {
         std::size_t working = 0;
         for (oms::OrderId id = 1; id <= om().orders_submitted(); ++id) {
+            if (!tabled(id)) continue;
             const auto st = info(id).status;
             if (!oms::is_terminal(st) && st != oms::OrderStatus::pending_cancel) ++working;
         }
@@ -1848,6 +2361,7 @@ private:
         if (sent != 0) hit(h_cancel_all);
         if (gw_open_) {
             for (oms::OrderId id = 1; id <= om().orders_submitted(); ++id) {
+                if (!tabled(id)) continue;
                 const auto st = info(id).status;
                 OT_CHECK(oms::is_terminal(st) || st == oms::OrderStatus::pending_cancel);
             }
@@ -1954,12 +2468,18 @@ private:
         if (pre.status == oms::OrderStatus::pending_new) hit(h_exec_before_ack);
         om().on_executed(exe(sh.tok, shares, px, ++match_), now_);
         sh.acked = true;
-        const Qty applied = std::min(shares, pre.leaves_qty);
+        sh.last_match = match_;
+        sh.last_shares = shares;
+        sh.last_px = px;
+        // An execution is a fact: all of it is booked, also the part beyond the open quantity
+        // the manager believed in; only leaves stops at zero.
+        const Qty closed = std::min(shares, pre.leaves_qty);
         const oms::OrderInfo& post = info(id);
-        OT_CHECK_EQ(post.cum_qty, pre.cum_qty + applied);
-        OT_CHECK_EQ(post.leaves_qty, pre.leaves_qty - applied);
+        OT_CHECK_EQ(post.cum_qty, pre.cum_qty + shares);
+        OT_CHECK_EQ(post.leaves_qty, pre.leaves_qty - closed);
+        OT_CHECK_EQ(post.req.qty, std::max(pre.req.qty, post.cum_qty));
         OT_CHECK_EQ(rig_.lis.fills.size(), fills_before + 1);
-        OT_CHECK_EQ(rig_.lis.fills.back().qty, applied);
+        OT_CHECK_EQ(rig_.lis.fills.back().qty, shares);
         OT_CHECK_EQ(rig_.lis.fills.back().price, px);
         if (post.leaves_qty == 0) {
             OT_STATE(om(), id, "filled");
@@ -1994,7 +2514,6 @@ private:
     void report_replaced(oms::OrderId id, const oms::OrderInfo& pre) {
         Shadow& sh = shadow(id);
         const Qty asked = sh.pend_qty > pre.cum_qty ? sh.pend_qty - pre.cum_qty : 0;
-        const Qty held = om().reserved_qty(id);
         const bool dead = rng_.chance(1, 6);
         Qty open = asked;
         if (rng_.chance(1, 4)) open = static_cast<Qty>(rng_.bounded(asked + 1));
@@ -2003,12 +2522,14 @@ private:
         const Price px = no_price ? 0 : sh.pend_px;
         const std::uint64_t old_tok = sh.tok;
         hit(dead ? h_replaced_dead : h_replaced);
-        if (!dead && std::min({open, asked, held}) < asked) hit(h_replaced_cut);
+        if (!dead && open < asked) hit(h_replaced_cut);
         if (pre.status == oms::OrderStatus::pending_cancel) hit(h_replaced_while_cancelling);
         om().on_replaced(rpl(old_tok, sh.pend_tok, open, px, 2000 + id, dead ? 'D' : 'L'), now_);
         sh.tok = sh.pend_tok;
         sh.pend_tok = 0;
-        const Qty want = dead ? 0 : std::min({open, asked, held});
+        // The exchange's open quantity is the truth (capped at what was asked), also when it is
+        // more than the manager held.
+        const Qty want = dead ? 0 : std::min(open, asked);
         const oms::OrderInfo& post = info(id);
         OT_CHECK_EQ(post.leaves_qty, want);
         OT_CHECK_EQ(post.cum_qty, pre.cum_qty);
@@ -2065,7 +2586,7 @@ private:
     }
 
     bool inject_illegal() {
-        const int kind = static_cast<int>(rng_.bounded(10));
+        const int kind = static_cast<int>(rng_.bounded(11));
         last_illegal_ = static_cast<std::size_t>(kind);
         const int which = static_cast<int>(rng_.bounded(5));
         switch (kind) {
@@ -2138,10 +2659,17 @@ private:
                 }
                 return true;
             }
-            default: {  // anything but Replaced/Rejected on an unconfirmed replacement token
+            case 9: {  // anything but Replaced/Rejected on an unconfirmed replacement token
                 const oms::OrderId id = pick(1);
                 if (id == 0 || shadow(id).pend_tok == 0) return false;
                 send_report(static_cast<int>(rng_.bounded(3)), tok(shadow(id).pend_tok));
+                return true;
+            }
+            default: {  // the last execution again, same match number
+                const oms::OrderId id = pick(1);
+                if (id == 0 || shadow(id).last_match == 0) return false;
+                const Shadow& sh = shadow(id);
+                om().on_executed(exe(sh.tok, sh.last_shares, sh.last_px, sh.last_match), now_);
                 return true;
             }
         }
@@ -2167,8 +2695,10 @@ private:
         std::int64_t sum_leaves[8][2] = {};
         std::int64_t sum_reserved[8][2] = {};
         for (oms::OrderId id = 1; id <= n; ++id) {
+            if (!tabled(id)) continue;  // finished, and its slot has been reused
             const oms::OrderInfo& i = info(id);
             OT_CHECK(i.leaves_qty + i.cum_qty <= i.req.qty);
+            OT_CHECK(i.cum_qty <= i.req.qty);
             OT_CHECK(i.req.qty >= 1 && i.req.qty <= kMaxOrderQty);
 
             const Tally t = id < tally_.size() ? tally_[id] : Tally{};
@@ -2189,11 +2719,15 @@ private:
             }
             ++open;
             OT_CHECK(i.leaves_qty >= 1);
-            OT_CHECK(reserved >= i.leaves_qty);
-            if (i.status == oms::OrderStatus::live || i.status == oms::OrderStatus::pending_new) {
-                OT_CHECK_EQ(reserved, i.leaves_qty);  // nothing in flight, nothing reserved
+            // Re-derived from the shadow, not from the manager: the ledger holds the leaves, or
+            // while a replace is in flight the larger of that and the open size it asks for.
+            const Shadow& sh = shadow(id);
+            Qty expect = i.leaves_qty;
+            if (sh.pend_tok != 0 && sh.pend_qty > i.cum_qty) {
+                expect = std::max(expect, sh.pend_qty - i.cum_qty);
             }
-            if (!grow_) OT_CHECK_EQ(reserved, i.leaves_qty);
+            OT_CHECK_EQ(reserved, expect);
+            if (!grow_ && sh.pend_tok == 0) OT_CHECK_EQ(reserved, i.leaves_qty);
             OT_CHECK(i.req.locate < 8);
             sum_leaves[i.req.locate][index(i.req.side)] += i.leaves_qty;
             sum_reserved[i.req.locate][index(i.req.side)] += reserved;
@@ -2205,12 +2739,15 @@ private:
             for (int s = 0; s < 2; ++s) {
                 const Side side = s == 0 ? Side::buy : Side::sell;
                 OT_CHECK_EQ(rig_.risk.open_qty(l, side), sum_reserved[l][s]);
-                if (!grow_) OT_CHECK_EQ(rig_.risk.open_qty(l, side), sum_leaves[l][s]);
+                OT_CHECK(sum_reserved[l][s] >= sum_leaves[l][s]);
                 all_open += sum_reserved[l][s];
             }
             OT_CHECK_EQ(rig_.risk.position(l).qty, position_[l]);
         }
-        if (all_open == 0) OT_CHECK_EQ(rig_.risk.open_orders(), 0u);
+        (void)all_open;
+        // The count is exact, not an estimate: one per working order, through every cancel,
+        // fill, growing replace and recycled slot.
+        OT_CHECK_EQ(static_cast<std::size_t>(rig_.risk.open_orders()), open);
     }
 
     bool have_final(oms::OrderId id) const { return final_[id].first; }
@@ -2290,7 +2827,7 @@ OT_TEST(random_play_keeps_the_ledger_consistent_without_growth) {
 }
 
 OT_TEST(random_play_keeps_the_ledger_consistent_with_growing_replaces) {
-    const auto hits = play(101, 5, true, 5000);
+    const auto hits = play(101, 10, true, 5000);
     OT_CHECK(hits[h_exec] > 300 && hits[h_submit_ok] > 300);
     require_covered(hits);
 }

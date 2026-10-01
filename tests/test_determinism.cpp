@@ -30,7 +30,7 @@ using namespace optitrade;
 namespace {
 
 constexpr std::uint64_t kExpectedImbalanceTaker = 0x71b2bc32e2aaea05ULL;
-constexpr std::uint64_t kExpectedMicropriceMaker = 0x9ddaaa919b1ee887ULL;
+constexpr std::uint64_t kExpectedMicropriceMaker = 0x003844521f903d75ULL;
 constexpr std::uint64_t kExpectedEmaCross = 0x8ae3940c57b17a0dULL;
 
 // Part of the frozen configuration: changing any value here changes the digests.

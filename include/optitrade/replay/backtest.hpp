@@ -57,8 +57,15 @@
 // Sizing. Nothing is allocated per message, but the engine and the simulator each build
 // their own MarketBooks, so `BacktestConfig{}` (default MarketBooks::Config) reserves
 // well over 100 MB per book set. Size books, order tables and locates explicitly. The order
-// manager keeps every order of the run (see oms/order_manager.hpp), so engine.oms.max_orders
-// bounds the orders one backtest can send; beyond it the strategy's submits are refused.
+// manager recycles the slots of finished orders (see oms/order_manager.hpp), so
+// engine.oms.max_orders bounds the orders WORKING at the same moment, not the orders of the
+// run; the simulator's max_orders bounds the same concurrency on its side (working orders plus
+// requests in flight). When a table or a queue is too small the strategy's requests are refused
+// and the run is degraded without any error, so the report carries the evidence:
+// `capacity_rejects` (strategy requests refused for lack of room), `book_errors` and
+// `itch_skipped` (messages the books refused or the decoder could not read, e.g. because the
+// books were sized too small for the feed), and `dropped_reports`. Any of them non-zero means
+// the numbers describe a run the strategy did not get to have.
 namespace optitrade::replay {
 
 struct BacktestConfig {
@@ -79,6 +86,9 @@ struct BacktestReport {
     std::int64_t max_drawdown{};
     std::uint64_t digest{};               // over every outbound order message and every report delivered
     std::uint64_t dropped_reports{};
+    std::uint64_t capacity_rejects{};     // strategy requests refused: order table or gateway full
+    std::uint64_t book_errors{};          // ITCH messages decoded but refused by the engine's books
+    std::uint64_t itch_skipped{};         // ITCH messages the engine could not decode
 
     friend bool operator==(const BacktestReport&, const BacktestReport&) = default;
 };
@@ -203,6 +213,9 @@ BacktestReport run_backtest(Source& src, const BacktestConfig& config, S strateg
     report.max_drawdown = eng.risk().max_drawdown();
     report.digest = digest.value();
     report.dropped_reports = exchange.dropped_reports();
+    report.capacity_rejects = st.capacity_rejects;
+    report.book_errors = st.book_errors;
+    report.itch_skipped = st.itch_skipped;
     return report;
 }
 
@@ -241,6 +254,17 @@ inline void print_report(const BacktestReport& r, const char* title, std::FILE* 
     if (r.dropped_reports != 0) {
         std::fprintf(out, "dropped reports %llu  (simulator report ring overflowed; results unreliable)\n",
                      u(r.dropped_reports));
+    }
+    if (r.capacity_rejects != 0) {
+        std::fprintf(out, "capacity rejects %llu  (order table or gateway full; the strategy's requests were refused)\n",
+                     u(r.capacity_rejects));
+    }
+    if (r.book_errors != 0) {
+        std::fprintf(out, "book errors     %llu  (books refused messages; undersized books? results unreliable)\n",
+                     u(r.book_errors));
+    }
+    if (r.itch_skipped != 0) {
+        std::fprintf(out, "itch skipped    %llu  (messages not decoded)\n", u(r.itch_skipped));
     }
     std::fprintf(out, "digest          %016llx\n", u(r.digest));
 }

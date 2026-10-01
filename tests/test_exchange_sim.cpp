@@ -347,16 +347,51 @@ OT_TEST(executed_with_price_fills_at_the_c_price) {
     rig.exec_price(21, 5, 1'000'095, 7);   // 5 -> 0, exactly exhausted
     OT_CHECK_EQ(take(rig.sim).size(), std::size_t{0});
     rig.add(22, Side::sell, 100, 1'000'100, 8);
-    rig.exec_price(22, 12, 1'000'080, 9);  // 12 fill us, at the C price, not our limit
+    // A print above our ask is better than we asked for and is credited as printed.
+    rig.exec_price(22, 12, 1'000'120, 9);
     auto reps = take(rig.sim);
     OT_CHECK_EQ(reps.size(), std::size_t{1});
     OT_CHECK_EQ(reps[0].exe.shares, Qty{12});
-    OT_CHECK_EQ(reps[0].exe.price, Price{1'000'080});
+    OT_CHECK_EQ(reps[0].exe.price, Price{1'000'120});
     rig.exec(22, 50, 10);  // E fills at the limit: the remaining 18
     reps = take(rig.sim);
     OT_CHECK_EQ(reps.size(), std::size_t{1});
     OT_CHECK_EQ(reps[0].exe.shares, Qty{18});
     OT_CHECK_EQ(reps[0].exe.price, Price{1'000'100});
+}
+
+// A C print below a sell limit (or above a buy limit) is a price our order would not have
+// accepted, so the fill is at the limit, never outside it.
+OT_TEST(executed_with_price_never_fills_outside_the_limit) {
+    Rig rig;
+    rig.add(1, Side::sell, 500, 1'000'500, 1);
+    rig.add(10, Side::buy, 50, kP100, 2);
+    rig.add(13, Side::buy, 50, kP100, 3);
+    OT_CHECK(rig.submit(enter(1, Side::buy, 20, kP100), 4));  // ahead = 100
+    rig.add(20, Side::sell, 50, 1'000'100, 5);
+    rig.add(21, Side::sell, 50, 1'000'100, 6);
+    OT_CHECK(rig.submit(enter(2, Side::sell, 20, 1'000'100), 7));  // ahead = 100
+    take(rig.sim);
+    rig.exec_price(10, 50, kP100, 8);
+    rig.exec_price(13, 50, kP100, 9);
+    rig.exec_price(20, 50, 1'000'100, 10);
+    rig.exec_price(21, 50, 1'000'100, 11);  // both queues are exactly exhausted
+    OT_CHECK_EQ(take(rig.sim).size(), std::size_t{0});
+
+    rig.add(12, Side::buy, 100, kP100, 12);
+    rig.add(22, Side::sell, 100, 1'000'100, 13);
+    rig.exec_price(12, 5, kP100 + 300, 14);       // buyer would pay 100.0300 for a 100.0000 limit
+    rig.exec_price(22, 5, 1'000'100 - 300, 15);   // seller would get 100.0100 for a 100.0100 limit
+    auto reps = take(rig.sim);
+    OT_CHECK_EQ(reps.size(), std::size_t{2});
+    OT_CHECK(reps[0].exe.token == tok(1));
+    OT_CHECK_EQ(reps[0].exe.price, kP100);
+    OT_CHECK(reps[1].exe.token == tok(2));
+    OT_CHECK_EQ(reps[1].exe.price, Price{1'000'100});
+    rig.exec_price(12, 3, kP100 - 200, 16);       // a better print for the buyer is credited
+    reps = take(rig.sim);
+    OT_CHECK_EQ(reps.size(), std::size_t{1});
+    OT_CHECK_EQ(reps[0].exe.price, kP100 - 200);
 }
 
 OT_TEST(one_execution_is_split_over_our_orders_in_arrival_order) {
@@ -376,6 +411,52 @@ OT_TEST(one_execution_is_split_over_our_orders_in_arrival_order) {
     OT_CHECK_EQ(reps[0].exe.shares, Qty{10});
     OT_CHECK(reps[1].exe.token == tok(2));
     OT_CHECK_EQ(reps[1].exe.shares, Qty{7});
+}
+
+// Other participants' cancels shrink the displayed size between our two arrivals. The later
+// order must still queue behind the earlier one: its `ahead` is at least the earlier order's
+// `ahead` plus its leaves, not just the (smaller) displayed size plus its leaves.
+OT_TEST(our_later_order_never_queues_ahead_of_our_earlier_one) {
+    Rig rig;
+    rig.add(10, Side::buy, 100, kP100, 1);
+    rig.add(11, Side::sell, 1000, 1'000'500, 2);
+    OT_CHECK(rig.submit(enter(1, Side::buy, 10, kP100), 3));  // ahead 100
+    rig.cancel(10, 60, 4);                                     // displayed 40; our ahead stays 100
+    OT_CHECK(rig.submit(enter(2, Side::buy, 10, kP100), 5));  // naive: 40 + 10 = 50; FIFO: 100 + 10 = 110
+    rig.add(12, Side::buy, 100, kP100, 6);
+    take(rig.sim);
+
+    rig.exec(12, 60, 7);   // 100 -> 40 for order 1, 110 -> 50 for order 2
+    OT_CHECK_EQ(take(rig.sim).size(), std::size_t{0});  // the naive queue fills order 2 here
+    rig.exec(12, 40, 8);   // 40 -> 0, 50 -> 10
+    OT_CHECK_EQ(take(rig.sim).size(), std::size_t{0});
+
+    rig.add(13, Side::buy, 100, kP100, 9);
+    rig.exec(13, 30, 10);  // order 1 takes its 10, order 2 clears its last 10 of queue and takes 10
+    const auto reps = take(rig.sim);
+    OT_CHECK_EQ(reps.size(), std::size_t{2});
+    if (reps.size() != 2) return;
+    OT_CHECK(reps[0].exe.token == tok(1));
+    OT_CHECK_EQ(reps[0].exe.shares, Qty{10});
+    OT_CHECK(reps[1].exe.token == tok(2));
+    OT_CHECK_EQ(reps[1].exe.shares, Qty{10});
+}
+
+// The documented gap of the model: a bid above the best displayed bid is not advanced by the
+// orders behind it trading.
+OT_TEST(price_improving_quote_is_not_filled_by_orders_resting_behind_it) {
+    Rig rig;
+    rig.add(10, Side::buy, 50, kP100, 1);
+    rig.add(11, Side::sell, 500, 1'030'000, 2);
+    OT_CHECK(rig.submit(enter(1, Side::buy, 10, 1'010'000), 3));  // better than the best bid
+    take(rig.sim);
+    rig.exec(10, 50, 4);  // the 100.0000 bid trades completely
+    OT_CHECK_EQ(take(rig.sim).size(), std::size_t{0});
+    OT_CHECK_EQ(rig.sim.fills(), std::uint64_t{0});
+    rig.add(12, Side::sell, 5, 1'010'000, 5);  // only an opposing add reaches it
+    const auto reps = take(rig.sim);
+    OT_CHECK_EQ(reps.size(), std::size_t{1});
+    OT_CHECK_EQ(reps[0].exe.price, Price{1'010'000});
 }
 
 // ---- latency ----------------------------------------------------------------------------
@@ -734,6 +815,39 @@ OT_TEST(an_itch_replace_that_moves_through_the_limit_also_fills) {
     OT_CHECK_EQ(reps[0].exe.price, kP100);
 }
 
+// The remainder of a marketable DAY order rests after taking every share it could see. The
+// displayed book is never reduced, so an unrelated add must not make it trade a second time.
+OT_TEST(day_remainder_of_a_marketable_order_is_not_filled_again_by_unrelated_messages) {
+    Rig rig;
+    const Price ask = 1'010'000;
+    const Price limit = 1'050'000;
+    rig.add(10, Side::sell, 10, ask, 1);
+    rig.add(11, Side::buy, 100, 990'000, 2);
+    OT_CHECK(rig.submit(enter(1, Side::buy, 50, limit), 3));
+    auto reps = take(rig.sim);
+    OT_CHECK_EQ(reps.size(), std::size_t{2});  // Accepted, then the 10 it could see
+    if (reps.size() != 2) return;
+    OT_CHECK_EQ(reps[1].exe.shares, Qty{10});
+    OT_CHECK_EQ(reps[1].exe.price, ask);
+    OT_CHECK_EQ(rig.sim.resting_orders(), std::size_t{1});  // 40 rest
+
+    rig.add(12, Side::buy, 1, 980'000, 4);            // same side, far away
+    rig.replace(11, 14, 100, 985'000, 5);             // a bid moves: still the same side
+    rig.add(13, Side::sell, 5, 1'060'000, 6);         // an ask above our limit
+    rig.exec(10, 10, 7);                              // the ask we already took trades
+    rig.trade(10, ask, 8);
+    OT_CHECK_EQ(take(rig.sim).size(), std::size_t{0});
+    OT_CHECK_EQ(rig.sim.fills(), std::uint64_t{1});
+
+    rig.add(15, Side::sell, 5, 1'040'000, 9);         // an ask that reaches the limit does trade
+    reps = take(rig.sim);
+    OT_CHECK_EQ(reps.size(), std::size_t{1});
+    if (reps.size() != 1) return;
+    OT_CHECK_EQ(reps[0].exe.shares, Qty{40});
+    OT_CHECK_EQ(reps[0].exe.price, limit);
+    OT_CHECK_EQ(rig.sim.resting_orders(), std::size_t{0});
+}
+
 // ---- capacity ---------------------------------------------------------------------------
 
 OT_TEST(full_queues_refuse_or_reject_instead_of_growing) {
@@ -759,15 +873,62 @@ OT_TEST(full_queues_refuse_or_reject_instead_of_growing) {
     OT_CHECK_EQ(after[0].type, 'A');
 }
 
-OT_TEST(report_queue_overflow_is_counted_not_grown) {
-    Rig rig(0, 0, 4);  // report queue holds max(1024, 8) = 1024
-    for (std::uint64_t i = 1; i <= 1100; ++i) {
-        OT_CHECK(rig.submit(enter(i, Side::buy, 10, kP100, ouch::kTifSystemHours, "NOPE"), i));
-    }
+// Reports caused by market messages cannot be foreseen when an order is sent, so if they fill
+// the report queue the extra reports are dropped and counted, never queued beyond the limit.
+OT_TEST(report_queue_overflow_from_market_fills_is_counted_not_grown) {
+    Rig rig(0, 0, 4);  // report queue holds max(1024, 4 x 4) = 1024
+    rig.add(1, Side::buy, 100'000, kP100, 1);
+    OT_CHECK(rig.submit(enter(1, Side::buy, 100'000, kP100), 2));  // Accepted: report 1
+    rig.exec(1, 100'000, 3);                                       // the queue ahead of us is gone
+    rig.add(2, Side::buy, 100'000, kP100, 4);
+    for (Nanos t = 5; t < 5 + 1100; ++t) rig.exec(2, 1, t);       // one fill per message
     OT_CHECK_EQ(rig.sim.pending_reports(), std::size_t{1024});
-    OT_CHECK_EQ(rig.sim.dropped_reports(), std::uint64_t{76});
+    OT_CHECK_EQ(rig.sim.dropped_reports(), std::uint64_t{77});    // 1 + 1100 reports, 1024 fit
     OT_CHECK_EQ(take(rig.sim).size(), std::size_t{1024});
     OT_CHECK_EQ(rig.sim.pending_reports(), std::size_t{0});
+}
+
+// A request is refused while the reports it could cause might not fit, so a slow drain
+// together with a long report latency cannot silently lose reports to requests.
+OT_TEST(send_refuses_when_the_reports_it_could_cause_might_overflow) {
+    sim::SimConfig c = make_config(0, 1'000'000'000, 8);
+    c.books.max_levels_per_side = 256;  // a walk may report 256 fills: cost 258 of 1024
+    sim::ExchangeSim s(c);
+    auto feed = [&](const auto& m, Nanos ts) {
+        std::array<std::byte, 64> b{};
+        const std::size_t n = itch::encode(m, b);
+        s.on_itch(std::span<const std::byte>(b.data(), n), ts);
+    };
+    itch::StockDirectory d;
+    d.h.locate = kAapl;
+    d.symbol = Symbol("AAPL");
+    feed(d, 0);
+    for (int i = 0; i < 250; ++i) {
+        itch::AddOrder a;
+        a.h.locate = kAapl;
+        a.ref = 100 + i;
+        a.side = Side::sell;
+        a.shares = 1;
+        a.symbol = Symbol("AAPL");
+        a.price = 1'000'000 + 100 * i;
+        feed(a, 1 + i);
+    }
+    int accepted = 0;
+    for (std::uint64_t k = 1; k <= 8; ++k) {
+        if (s.send(enter(k, Side::buy, 400, 2'000'000, ouch::kTifIoc), 1000 + k)) ++accepted;
+    }
+    OT_CHECK_EQ(accepted, 3);  // 3 x 258 = 774 fit in 1024, a fourth would not
+    s.advance(2000);
+    OT_CHECK_EQ(s.dropped_reports(), std::uint64_t{0});
+    OT_CHECK_EQ(s.fills(), std::uint64_t{750});  // every accepted order walked all 250 levels
+    OT_CHECK_EQ(s.pending_reports(), std::size_t{3 * 252});
+    // Cancels are cheap (one report) and still fit next to the backlog.
+    OT_CHECK(s.send(ouch::CancelOrder{tok(1), 0}, 3000));
+    // Once the backlog is drained the refused orders can be sent.
+    std::size_t drained = 0;
+    s.drain_reports(~Nanos{0}, [&](std::span<const std::byte>, Nanos) { ++drained; });
+    OT_CHECK_EQ(drained, std::size_t{3 * 252});
+    OT_CHECK(s.send(enter(9, Side::buy, 400, 2'000'000, ouch::kTifIoc), 4000));
 }
 
 OT_TEST(malformed_and_irrelevant_feed_messages_are_ignored) {
@@ -827,38 +988,79 @@ OT_TEST(report_bytes_match_the_ouch_tables) {
 
 // ---- randomized -------------------------------------------------------------------------
 
-// Closed-form model of one bid level with no asks. Order j (arrival order) fills
-//   clamp(S_j - ahead0_j, 0, size_j)
-// where S_j is the displayed execution volume at the level since j arrived and ahead0_j is the
-// displayed size at arrival plus the still-open size of our earlier orders. The reference keeps
-// its own tally of the displayed size and never looks at the simulator's queue.
-OT_TEST(queue_model_matches_closed_form_reference) {
+// Independent queue model of one bid level with no asks. The reference keeps the level as an
+// explicit queue of segments (others' shares, ours per order) and never looks at the
+// simulator's `ahead` bookkeeping:
+//   * a market add appends a segment of other participants' shares;
+//   * an execution of s shares consumes s shares from the FRONT of the queue, whichever order
+//     the feed names; our segments that it reaches are fills;
+//   * a cancel by another participant changes nothing in the queue (their shares stay in front
+//     of us, the conservative rule) but shrinks the displayed size;
+//   * one of our orders joins at the first share offset that is at least the displayed size
+//     plus our own open size and lies behind every segment of ours already in the queue.
+// Besides the exact fill comparison, FIFO among our orders is asserted directly: an order
+// may only have filled while every earlier order of ours is complete.
+OT_TEST(queue_model_matches_explicit_queue_reference) {
+    struct Seg {
+        std::uint64_t own{};  // 0 = other participants, else our order id
+        std::uint64_t qty{};
+    };
     for (std::uint64_t seed = 1; seed <= 300; ++seed) {
         Rng rng(seed);
         Rig rig(0, 0, 256);
         rig.add(1, Side::sell, 1, 1'900'000, 1);  // far ask so nothing crosses
-        struct Mine {
-            Qty size{};
-            std::uint64_t ahead0{};
-            std::uint64_t seen{};  // displayed volume executed since arrival
-            std::uint64_t id{};
-        };
         struct Market {
             OrderRef ref{};
             Qty qty{};
         };
-        std::vector<Mine> mine;
+        std::vector<Seg> queue;
         std::vector<Market> market;
+        std::map<std::uint64_t, Qty> size;     // our order id -> size
+        std::map<std::uint64_t, Qty> expected; // fills by the reference
+        std::map<std::uint64_t, Qty> got;      // fills by the simulator
         std::uint64_t displayed = 0;
         OrderRef next_ref = 100;
         std::uint64_t next_id = 1;
-        std::map<std::uint64_t, Qty> got;
         Nanos t = 10;
 
-        auto cum = [&](const Mine& m) {
-            const std::uint64_t s = m.seen > m.ahead0 ? m.seen - m.ahead0 : 0;
-            return std::min<std::uint64_t>(s, m.size);
+        auto own_open = [&] {
+            std::uint64_t n = 0;
+            for (const Seg& g : queue) {
+                if (g.own != 0) n += g.qty;
+            }
+            return n;
         };
+        auto join = [&](std::uint64_t id, Qty q) {
+            // Offset just behind our last segment still in the queue.
+            std::uint64_t offset = 0, behind_ours = 0;
+            for (const Seg& g : queue) {
+                offset += g.qty;
+                if (g.own != 0) behind_ours = offset;
+            }
+            const std::uint64_t at = std::max(displayed + own_open(), behind_ours);
+            std::uint64_t pos = 0;
+            std::size_t i = 0;
+            while (i < queue.size() && pos + queue[i].qty <= at) pos += queue[i++].qty;
+            if (i < queue.size() && pos < at) {  // split the segment the offset falls into
+                Seg tail = queue[i];
+                tail.qty -= at - pos;
+                queue[i].qty = at - pos;
+                queue.insert(queue.begin() + static_cast<std::ptrdiff_t>(i) + 1, tail);
+                ++i;
+            }
+            queue.insert(queue.begin() + static_cast<std::ptrdiff_t>(i), Seg{id, q});
+        };
+        auto consume_front = [&](std::uint64_t shares) {
+            while (shares != 0 && !queue.empty()) {
+                Seg& g = queue.front();
+                const std::uint64_t c = std::min(shares, g.qty);
+                if (g.own != 0) expected[g.own] += static_cast<Qty>(c);
+                g.qty -= c;
+                shares -= c;
+                if (g.qty == 0) queue.erase(queue.begin());
+            }
+        };
+
         for (int step = 0; step < 60; ++step) {
             ++t;
             const std::uint64_t pick = rng.bounded(10);
@@ -866,6 +1068,7 @@ OT_TEST(queue_model_matches_closed_form_reference) {
                 const Qty q = static_cast<Qty>(rng.range(1, 40));
                 rig.add(next_ref, Side::buy, q, kP100, t);
                 market.push_back({next_ref++, q});
+                queue.push_back({0, q});
                 displayed += q;
             } else if (pick < 6) {
                 const std::size_t i = rng.bounded(market.size());
@@ -873,29 +1076,30 @@ OT_TEST(queue_model_matches_closed_form_reference) {
                 rig.exec(market[i].ref, s, t);
                 market[i].qty -= s;
                 displayed -= s;
-                for (Mine& m : mine) m.seen += s;
+                consume_front(s);
                 if (market[i].qty == 0) market.erase(market.begin() + static_cast<std::ptrdiff_t>(i));
-            } else if (pick < 7) {
+            } else if (pick < 8) {
                 const std::size_t i = rng.bounded(market.size());
                 const Qty s = static_cast<Qty>(rng.range(1, market[i].qty));
-                rig.cancel(market[i].ref, s, t);  // others' cancels: displayed shrinks, our ahead does not
+                rig.cancel(market[i].ref, s, t);  // others' cancels: displayed shrinks, the queue does not
                 market[i].qty -= s;
                 displayed -= s;
                 if (market[i].qty == 0) market.erase(market.begin() + static_cast<std::ptrdiff_t>(i));
             } else {
-                Mine m;
-                m.size = static_cast<Qty>(rng.range(1, 30));
-                m.id = next_id++;
-                m.ahead0 = displayed;
-                for (const Mine& e : mine) m.ahead0 += e.size - cum(e);
-                OT_CHECK(rig.submit(enter(m.id, Side::buy, m.size, kP100), t));
-                mine.push_back(m);
+                const Qty q = static_cast<Qty>(rng.range(1, 30));
+                const std::uint64_t id = next_id++;
+                OT_CHECK(rig.submit(enter(id, Side::buy, q, kP100), t));
+                size[id] = q;
+                join(id, q);
             }
             for (const auto& r : take(rig.sim)) {
                 if (r.type == 'E') got[*r.exe.token.to_id()] += r.exe.shares;
             }
-            for (const Mine& m : mine) {
-                OT_CHECK_EQ(static_cast<std::uint64_t>(got[m.id]), cum(m));
+            for (const auto& [id, q] : size) {
+                OT_CHECK_EQ(got[id], expected[id]);
+                if (got[id] != 0) {  // FIFO among our own orders
+                    for (std::uint64_t earlier = 1; earlier < id; ++earlier) OT_CHECK_EQ(got[earlier], size[earlier]);
+                }
             }
         }
     }

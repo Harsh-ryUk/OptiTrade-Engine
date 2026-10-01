@@ -79,20 +79,21 @@ struct Gateway final : oms::OrderGateway {
     std::vector<ouch::ReplaceOrder> replaces;
     std::vector<Nanos> enter_times;
     bool accept{true};
+    std::uint64_t refused{};  // sends answered with false
 
     bool send(const ouch::EnterOrder& m, Nanos now) override {
-        if (!accept) return false;
+        if (!accept) return ++refused == 0;
         enters.push_back(m);
         enter_times.push_back(now);
         return true;
     }
     bool send(const ouch::CancelOrder& m, Nanos) override {
-        if (!accept) return false;
+        if (!accept) return ++refused == 0;
         cancels.push_back(m);
         return true;
     }
     bool send(const ouch::ReplaceOrder& m, Nanos) override {
-        if (!accept) return false;
+        if (!accept) return ++refused == 0;
         replaces.push_back(m);
         return true;
     }
@@ -538,15 +539,15 @@ OT_TEST(replace_through_the_strategy_is_risk_checked_and_counted) {
 
     std::vector<oms::SubmitStatus> st;
     r.eng.strategy().on_book = [&](Locate, const strategy::Context& ctx) {
-        st.push_back(ctx.orders.replace(sub.id, kPx, 250, ctx.now));  // growth 200 > 100
-        st.push_back(ctx.orders.replace(sub.id, kPx, 120, ctx.now));  // growth 70 <= 100
+        st.push_back(ctx.orders.replace(sub.id, kPx, 250, ctx.now));  // open 250 and growth 200, both > 100
+        st.push_back(ctx.orders.replace(sub.id, kPx, 90, ctx.now));   // open 90 and growth 40, both <= 100
     };
     r.itch(add(kAapl, 3, Side::buy, 10, 990'000));
     OT_CHECK_EQ(st.size(), std::size_t{2});
     OT_CHECK(st[0] == oms::SubmitStatus::rejected_by_risk);
     OT_CHECK(st[1] == oms::SubmitStatus::ok);
     OT_CHECK_EQ(r.gw.replaces.size(), std::size_t{1});
-    OT_CHECK_EQ(r.gw.replaces[0].shares, Qty{120});
+    OT_CHECK_EQ(r.gw.replaces[0].shares, Qty{90});
     OT_CHECK_EQ(r.eng.stats().risk_rejects, std::uint64_t{1});
 }
 
@@ -708,6 +709,155 @@ OT_TEST(feed_gap_with_a_refusing_gateway_can_be_retried) {
     OT_CHECK_EQ(r.gw.cancels.size(), std::size_t{1});
 }
 
+// Halted with a gateway that keeps refusing: the engine tries again, but only once per interval
+// of message time and only while orders are open, whichever side the messages come from.
+OT_TEST(halted_engine_retries_refused_cancels_once_per_interval) {
+    Rig<> r(small_config());
+    r.aapl_book();
+    r.eng.orders().submit({kAapl, Side::buy, kPx, 10, oms::Tif::day}, 100);
+    r.eng.orders().submit({kAapl, Side::buy, kPx - 100, 10, oms::Tif::day}, 101);
+    const std::size_t calls = r.eng.strategy().book_calls.size();
+    r.gw.accept = false;
+    r.eng.on_feed_gap(1'000'000);
+    OT_CHECK_EQ(r.gw.refused, std::uint64_t{2});  // both cancels refused at once
+
+    // Inside the retry interval (100 us) nothing is attempted, from either entry point.
+    for (Nanos t = 1'000'010; t < 1'050'000; t += 1000) r.eng.on_itch(add(kAapl, 100 + t, Side::buy, 1, 900'000).view(), t);
+    r.eng.on_ouch(accepted(1, 5, 10).view(), 1'050'000);
+    OT_CHECK_EQ(r.gw.refused, std::uint64_t{2});
+
+    // After it, one sweep per interval however many messages arrive.
+    for (Nanos t = 1'100'000; t < 1'150'000; t += 1000) r.eng.on_itch(add(kAapl, 100 + t, Side::buy, 1, 900'000).view(), t);
+    OT_CHECK_EQ(r.gw.refused, std::uint64_t{4});
+    OT_CHECK_EQ(r.gw.cancels.size(), std::size_t{0});
+
+    // The gateway recovers: the next sweep (through on_ouch this time) sends both cancels once.
+    r.gw.accept = true;
+    r.eng.on_ouch(accepted(2, 6, 10, kPx - 100).view(), 1'200'000);
+    OT_CHECK_EQ(r.gw.cancels.size(), std::size_t{2});
+    if (r.gw.cancels.size() != 2) return;
+    OT_CHECK(r.gw.cancels[0].token == ouch::Token::from_id(1));
+    OT_CHECK(r.gw.cancels[1].token == ouch::Token::from_id(2));
+    for (Nanos t = 1'300'000; t < 1'600'000; t += 10'000) r.eng.on_itch(add(kAapl, 100 + t, Side::buy, 1, 900'000).view(), t);
+    OT_CHECK_EQ(r.gw.cancels.size(), std::size_t{2});  // in flight: not repeated
+
+    // Halted means halted: no new order, no strategy call, no replace.
+    OT_CHECK_EQ(r.gw.enters.size(), std::size_t{2});
+    OT_CHECK_EQ(r.gw.replaces.size(), std::size_t{0});
+    OT_CHECK_EQ(r.eng.strategy().book_calls.size(), calls);
+}
+
+OT_TEST(halted_engine_does_not_sweep_when_nothing_is_open) {
+    Rig<> r(small_config());
+    r.aapl_book();
+    r.gw.accept = false;
+    r.eng.on_feed_gap(1'000'000);
+    r.eng.on_itch(add(kAapl, 50, Side::buy, 1, 900'000).view(), 2'000'000);
+    OT_CHECK_EQ(r.gw.refused, std::uint64_t{0});  // nothing to cancel, nothing attempted
+}
+
+// The scenario behind the retry: the simulator's request queue is full when the gap is declared,
+// so the cancels are refused. With the retry, every order is pulled as soon as there is room.
+// What stays possible is a fill for an order that is live at the exchange until its cancel gets
+// there; what must never happen is a new order after the gap or an order left working.
+struct GapRun {
+    engine::Stats stats;
+    std::size_t open_orders{};
+    std::size_t resting{};
+    std::int64_t position{};
+    std::size_t book_calls{};
+};
+
+GapRun run_gap_against_simulator(Nanos crossing_add_at) {
+    sim::SimConfig sc;
+    sc.order_latency_ns = 1'000'000;
+    sc.report_latency_ns = 1000;
+    sc.max_orders = 3;  // the request queue holds three
+    sc.books.max_orders = 1u << 12;
+    sc.books.max_levels_per_side = 16;
+    sc.books.max_symbols = 8;
+    sim::ExchangeSim ex(sc);
+    engine::Config ec = small_config();
+    ec.limits.max_position = 1000;
+    engine::Engine<Scripted> eng(ec, ex);
+
+    auto step = [&](const Wire& w, Nanos t) {  // the backtester's loop body
+        ex.advance(t);
+        ex.drain_reports(t, [&](std::span<const std::byte> m, Nanos at) { eng.on_ouch(m, at); });
+        ex.on_itch(w.view(), t);
+        eng.on_itch(w.view(), t);
+    };
+    step(directory(kAapl, "AAPL"), 1);
+    step(add(kAapl, 1, Side::buy, 100, kPx), 2);
+    step(add(kAapl, 2, Side::sell, 100, 1'010'000), 3);
+    for (int i = 0; i < 3; ++i) eng.orders().submit({kAapl, Side::buy, kPx, 10, oms::Tif::day}, 100 + i);
+    const std::size_t calls = eng.strategy().book_calls.size();
+    eng.on_feed_gap(500'000);  // the request queue is still full: all three cancels refused
+    OT_CHECK_EQ(eng.orders().open_orders(), std::size_t{3});
+
+    step(add(kAapl, 10, Side::buy, 1, 500'000), 1'200'000);  // the queue has room again
+    step(add(kAapl, 11, Side::sell, 1, 999'000), crossing_add_at);  // an ask through our bids
+    for (Nanos t = 3'000'000; t < 6'000'000; t += 500'000) step(add(kAapl, 100 + t, Side::buy, 1, 500'000), t);
+
+    GapRun g;
+    g.stats = eng.stats();
+    g.open_orders = eng.orders().open_orders();
+    g.resting = ex.resting_orders();
+    g.position = eng.risk().position(kAapl).qty;
+    g.book_calls = eng.strategy().book_calls.size() - calls;
+    return g;
+}
+
+OT_TEST(feed_gap_with_a_full_request_queue_still_ends_with_nothing_working) {
+    // The ask arrives after the retried cancels (sent at 1.2 ms, arriving at 2.2 ms): no fills.
+    const GapRun late = run_gap_against_simulator(2'500'000);
+    OT_CHECK_EQ(late.open_orders, std::size_t{0});
+    OT_CHECK_EQ(late.resting, std::size_t{0});
+    OT_CHECK_EQ(late.stats.fills, std::uint64_t{0});
+    OT_CHECK_EQ(late.position, std::int64_t{0});
+    OT_CHECK_EQ(late.stats.orders_sent, std::uint64_t{0});  // the three were sent directly, none by the strategy
+    OT_CHECK_EQ(late.book_calls, std::size_t{0});
+
+    // An ask that reaches the exchange before the cancels do still fills the orders that are live
+    // there: the halt cannot take back what is already at the venue. Afterwards nothing is left.
+    const GapRun early = run_gap_against_simulator(1'500'000);
+    OT_CHECK_EQ(early.stats.fills, std::uint64_t{3});
+    OT_CHECK_EQ(early.position, std::int64_t{30});
+    OT_CHECK_EQ(early.open_orders, std::size_t{0});
+    OT_CHECK_EQ(early.resting, std::size_t{0});
+    OT_CHECK_EQ(early.book_calls, std::size_t{0});
+}
+
+OT_TEST(capacity_and_gateway_refusals_to_the_strategy_are_counted) {
+    engine::Config c = small_config();
+    c.oms.max_orders = 2;
+    Rig<> r(c);
+    r.aapl_book();
+    std::vector<oms::SubmitStatus> st;
+    r.eng.strategy().on_book = [&](Locate l, const strategy::Context& ctx) {
+        st.push_back(ctx.orders.submit({l, Side::buy, kPx, 1, oms::Tif::day}, ctx.now).status);
+    };
+    for (OrderRef ref = 10; ref < 14; ++ref) r.itch(add(kAapl, ref, Side::buy, 1, 900'000));
+    // Two orders fit; the other two find every slot working.
+    OT_CHECK_EQ(st.size(), std::size_t{4});
+    OT_CHECK(st[0] == oms::SubmitStatus::ok);
+    OT_CHECK(st[1] == oms::SubmitStatus::ok);
+    OT_CHECK(st[2] == oms::SubmitStatus::capacity);
+    OT_CHECK(st[3] == oms::SubmitStatus::capacity);
+    OT_CHECK_EQ(r.eng.stats().capacity_rejects, std::uint64_t{2});
+    OT_CHECK_EQ(r.eng.stats().orders_sent, std::uint64_t{2});
+
+    // A gateway that is full is the same kind of refusal, for new orders, replaces and cancels.
+    r.gw.accept = false;
+    const oms::OrderId id = r.eng.orders().find(1) != nullptr ? 1 : 0;
+    r.eng.strategy().on_book = [&](Locate, const strategy::Context& ctx) {
+        st.push_back(ctx.orders.cancel(id, ctx.now));
+    };
+    r.itch(add(kAapl, 20, Side::buy, 1, 900'000));
+    OT_CHECK(st.back() == oms::SubmitStatus::gateway_busy);
+    OT_CHECK_EQ(r.eng.stats().capacity_rejects, std::uint64_t{3});
+}
+
 // ---- allocation ----------------------------------------------------------------------------------
 
 OT_TEST(message_path_does_not_allocate) {
@@ -837,7 +987,7 @@ bool same(const engine::Stats& a, const engine::Stats& b) {
            a.book_updates == b.book_updates && a.book_errors == b.book_errors &&
            a.ouch_reports == b.ouch_reports && a.ouch_errors == b.ouch_errors &&
            a.feed_gaps == b.feed_gaps && a.orders_sent == b.orders_sent &&
-           a.risk_rejects == b.risk_rejects && a.fills == b.fills;
+           a.risk_rejects == b.risk_rejects && a.fills == b.fills && a.capacity_rejects == b.capacity_rejects;
 }
 
 template <class S>
@@ -854,6 +1004,7 @@ void check_real_strategy(std::uint64_t min_orders) {
     OT_CHECK_EQ(a.stats.itch_skipped, std::uint64_t{0});
     OT_CHECK_EQ(a.stats.ouch_errors, std::uint64_t{0});
     OT_CHECK_EQ(a.stats.book_errors, std::uint64_t{0});
+    OT_CHECK_EQ(a.stats.capacity_rejects, std::uint64_t{0});
     OT_CHECK(a.stats.book_updates > 30'000);
 
     // The strategy traded, every order it sent is in the order manager, and every report the

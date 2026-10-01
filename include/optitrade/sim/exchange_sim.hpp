@@ -69,24 +69,39 @@
 // is canceled with reason 'I'. A DAY remainder rests.
 //
 // Queue position. A resting order joins the BACK of its price level:
-//   ahead = displayed quantity at that side and price
-//         + leaves of our own earlier orders at the same price.
+//   ahead = max(displayed quantity at that side and price + leaves of our own earlier
+//               orders at the same price,
+//               ahead + leaves of our most recent order at that price).
+// The second term keeps our own orders in FIFO order. Other participants' cancels never
+// shrink `ahead` but do shrink the displayed quantity, so without it a later order of ours
+// could be handed less queue in front of it than an earlier one still has and would fill first.
 // Displayed executions (ITCH E, and C at its display level) at that side and price
 // remove min(shares, ahead) from the queue in front of us; only shares beyond
 // `ahead` fill our order (Executed at the level price for E, at the C message's
-// execution price for C, liquidity 'A'). Partial fills are normal; the fill of one
-// message is split over our orders at the level in arrival order.
+// execution price for C, liquidity 'A'). A C price is clamped to our limit (a buy never
+// pays more, a sell never receives less than it asked); a better print is credited at
+// the print. Partial fills are normal; the fill of one message is split over our orders
+// at the level in arrival order.
 // Conservative cancel handling: cancels and deletes by OTHER participants (X, D,
 // and the delete half of U) never advance our position, because the feed does not
 // tell us where in the queue they sat. Only our own cancel or replace does, and
 // then only for orders behind ours. Non-displayed trades (P) are ignored.
 //
-// Trade-through. After an ITCH add or replace, if the opposite best price has
-// moved through a resting limit (bid: best ask <= limit, ask: best bid >= limit),
-// the remainder fills at OUR limit price, because our order would have been the
-// better price and would have traded first. The full remaining quantity is filled,
-// not limited to what the crossing level displays: another optimistic
-// approximation, consistent with the no-impact rule.
+// Known limitation: a price-improving quote (a bid above the best displayed bid, or an ask
+// below the best displayed ask) fills only when an opposing ITCH add sweeps it (see
+// trade-through below) or when executions reach its own price level. Trading in the orders
+// resting behind it does not advance it: the feed does not say which orders a seller hit
+// first, and assuming the improving quote was hit would invent fills. The model therefore
+// under-fills improving quotes; it never over-fills them.
+//
+// Trade-through. When an ITCH add, or the new half of an ITCH replace, lands at a price that
+// reaches one of our resting limits on the other side (bid: ask <= limit, ask: bid >= limit),
+// the remainder of that order fills at OUR limit price, because our order would have been the
+// better price and would have traded first. Only orders reached by the message just applied
+// are considered: a DAY order that rested with displayed liquidity it had already taken
+// (the book is never reduced) must not be filled a second time by an unrelated add. The full
+// remaining quantity is filled, not limited to what the new order displays: another
+// optimistic approximation, consistent with the no-impact rule.
 //
 // Cancel (X). `shares` is the new intended size: the most that may execute in
 // total after the cancel. 0 cancels everything open. It never increases an order
@@ -111,10 +126,21 @@
 // Storage. Everything is sized in the constructor from SimConfig: the request
 // queue (max_orders entries), the order pool and token index (max_orders), the
 // per-instrument order lists (2 x 65536 handles) and the report queue
-// (max(1024, 2 x max_orders) entries). Nothing grows afterwards. send() returns
-// false when the request queue is full. If the report queue is full the report is
-// dropped and counted in dropped_reports(); drain regularly. MarketBooks follows its
-// own allocation policy (see market_books.hpp).
+// (max(1024, 4 x max_orders) entries of ~100 bytes: ~26 MB at the default max_orders).
+// Nothing grows afterwards. MarketBooks follows its own allocation policy (see
+// market_books.hpp).
+//
+// Report back-pressure. Reports stay queued until drained, and with a long report latency a
+// busy run can have many in flight. The reports a request can cause are bounded by the book
+// depth it can walk (Accepted, one Executed per level, a final Canceled: max_levels_per_side
+// + 2; a cancel causes one), so send() counts, for every request still queued, that worst
+// case on top of the reports already queued and returns false when the total would exceed
+// the report queue. The strategy then sees an ordinary refused send, exactly as for a full
+// request queue. Reports caused by market messages (fills of resting orders) cannot be
+// foreseen at send time; if they overflow the queue anyway, the report is dropped and
+// counted in dropped_reports(), and a run with dropped reports is not trustworthy. Drain
+// regularly. Because the refusal depends on what has been drained, a run that hits it is
+// not independent of drain timing (a run that never hits it is).
 //
 // Not thread safe. drain_reports' callback must not call drain_reports.
 namespace optitrade::sim {
@@ -136,7 +162,7 @@ public:
           by_token_(config.max_orders),
           heads_(2 * kLocates, kNil),
           tails_(2 * kLocates, kNil),
-          reports_(std::max<std::size_t>(1024, 2 * config.max_orders)) {}
+          reports_(std::max<std::size_t>(1024, 4 * config.max_orders)) {}
 
     bool send(const ouch::EnterOrder& m, Nanos now) override {
         Request r;
@@ -195,6 +221,7 @@ public:
             const Request r = requests_[req_head_];
             req_head_ = (req_head_ + 1) % requests_.size();
             --queued_;
+            reserved_ -= report_cost(r.kind);
             clock_ = std::max(clock_, r.arrival);
             switch (r.kind) {
                 case Kind::enter: on_enter(r); break;
@@ -309,7 +336,7 @@ private:
     void apply(const M& m) noexcept { books_.on(m); }
 
     void apply(const itch::AddOrder& m) noexcept {
-        if (books_.on(m) == book::Applied::ok) sweep_through(m.h.locate);
+        if (books_.on(m) == book::Applied::ok) sweep_through(m.h.locate, m.side, m.price);
     }
 
     void apply(const itch::OrderExecuted& m) noexcept {
@@ -335,29 +362,27 @@ private:
 
     void apply(const itch::OrderReplace& m) noexcept {
         const book::MarketBooks::OrderInfo* o = books_.order(m.old_ref);
-        const bool known = o != nullptr;
-        const Locate loc = known ? o->locate : Locate{};
-        if (books_.on(m) == book::Applied::ok && known) sweep_through(loc);
+        if (o == nullptr) {
+            books_.on(m);
+            return;
+        }
+        const book::MarketBooks::OrderInfo info = *o;  // the old order is gone after on()
+        if (books_.on(m) == book::Applied::ok) sweep_through(info.locate, info.side, m.price);
     }
 
-    // Our orders whose limit the opposite best has reached fill at their own limit.
-    void sweep_through(Locate loc) noexcept {
-        const book::OrderBook* bk = books_.book(loc);
-        if (bk == nullptr) return;
-        for (const Side side : {Side::buy, Side::sell}) {
-            Handle h = heads_[slot(loc, side)];
-            if (h == kNil) continue;
-            const std::optional<book::Level> far_touch = bk->best(opposite(side));
-            if (!far_touch) continue;
-            while (h != kNil) {
-                const Handle next = orders_[h].next;
-                Order& o = orders_[h];
-                if (crosses(side, o.price, far_touch->price)) {
-                    execute(o, o.leaves, o.price, kAdded);
-                    remove_order(h);
-                }
-                h = next;
+    // A displayed order was added on `added_side` at `added_price`. Our resting orders on
+    // the other side that it reaches fill at their own limit.
+    void sweep_through(Locate loc, Side added_side, Price added_price) noexcept {
+        const Side side = opposite(added_side);
+        Handle h = heads_[slot(loc, side)];
+        while (h != kNil) {
+            const Handle next = orders_[h].next;
+            Order& o = orders_[h];
+            if (crosses(side, o.price, added_price)) {
+                execute(o, o.leaves, o.price, kAdded);
+                remove_order(h);
             }
+            h = next;
         }
     }
 
@@ -377,7 +402,10 @@ private:
                 } else {
                     const std::uint64_t excess = shares - o.ahead;
                     o.ahead = 0;
-                    execute(o, static_cast<Qty>(std::min<std::uint64_t>(o.leaves, excess)), exec_price, kAdded);
+                    // A print outside our limit is still only worth the limit to a buyer or
+                    // seller who asked for no better.
+                    const Price px = side == Side::buy ? std::min(exec_price, o.price) : std::max(exec_price, o.price);
+                    execute(o, static_cast<Qty>(std::min<std::uint64_t>(o.leaves, excess)), px, kAdded);
                     if (o.leaves == 0) remove_order(h);
                 }
             }
@@ -513,10 +541,14 @@ private:
             return remove_order(h);
         }
         std::uint64_t ahead = bk != nullptr ? bk->qty_at(o.side, o.price) : 0;
+        std::uint64_t behind_own = 0;
         for (Handle j = heads_[slot(o.locate, o.side)]; j != kNil; j = orders_[j].next) {
-            if (orders_[j].price == o.price) ahead += orders_[j].leaves;
+            const Order& e = orders_[j];
+            if (e.price != o.price) continue;
+            ahead += e.leaves;
+            behind_own = std::max(behind_own, e.ahead + e.leaves);  // never overtake an earlier order of ours
         }
-        o.ahead = ahead;
+        o.ahead = std::max(ahead, behind_own);
         link_tail(h);
     }
 
@@ -590,8 +622,16 @@ private:
         return a > ~Nanos{0} - b ? ~Nanos{0} : a + b;
     }
 
+    // Most reports one request can cause: Accepted or Replaced, one Executed per level it
+    // can walk, and a closing Canceled. A cancel causes one report.
+    std::size_t report_cost(Kind k) const noexcept {
+        return k == Kind::cancel ? 1 : cfg_.books.max_levels_per_side + 2;
+    }
+
     bool enqueue(Request r, Nanos now) noexcept {
         if (queued_ == requests_.size()) return false;
+        if (report_count_ + reserved_ + report_cost(r.kind) > reports_.size()) return false;  // see "Report back-pressure"
+        reserved_ += report_cost(r.kind);
         r.arrival = saturating_add(now, cfg_.order_latency_ns);
         requests_[(req_head_ + queued_) % requests_.size()] = r;
         ++queued_;
@@ -641,6 +681,7 @@ private:
     std::vector<Request> requests_;  // ring
     std::size_t req_head_{0};
     std::size_t queued_{0};
+    std::size_t reserved_{0};  // worst-case reports of the queued requests
 
     Pool orders_;
     FlatHashMap<ouch::Token, Handle, TokenHash> by_token_;

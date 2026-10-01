@@ -258,15 +258,19 @@ OT_TEST(gross_position_counts_open_orders_and_releases_them) {
 }
 
 // Fills are facts and are never refused, so a book can end up beyond a cap. The check judges
-// the worst case after the order literally (contract 4.4): there is no reduce-only exception,
-// and a reducing order passes only once it brings the book back to the cap.
+// the worst case after the order (contract 4.4) but rejects only an order that leaves it above
+// the cap AND above where the book stands now: an order that shrinks an over-limit book must be
+// possible, one that adds to it must not.
 OT_TEST(caps_are_judged_on_the_state_after_the_order_even_when_already_exceeded) {
     Limits l = wide();
     l.max_position = 100;
     RiskEngine e(l, 4);
     e.on_fill(kA, kBuy, 150, 1000);
-    OT_REJECT(chk(e, kSell, 1000, 10), Reject::position);  // 140 > 100
+    OT_REJECT(chk(e, kSell, 1000, 10), Reject::none);      // 140: over the cap but closer to it
     OT_REJECT(chk(e, kSell, 1000, 50), Reject::none);      // 100 meets the cap
+    OT_REJECT(chk(e, kBuy, 1000, 1), Reject::position);    // 151 is further out
+    OT_REJECT(chk(e, kSell, 1000, 301), Reject::position); // flips to -151: further out than 150
+    OT_REJECT(chk(e, kSell, 1000, 250), Reject::none);     // flips to -100: back inside the cap
 
     Limits g = wide();
     g.max_gross_position = 200;
@@ -274,8 +278,10 @@ OT_TEST(caps_are_judged_on_the_state_after_the_order_even_when_already_exceeded)
     f.on_fill(kA, kSell, 150, 1000);
     f.on_order_open(kA, kSell, 100);  // worst case |-150 - 100| = 250, already beyond 200
     OT_CHECK_EQ(f.gross_exposure(), 250);
-    // A buy cuts the buy leg to 50 but not the sell leg, so the worst case stays 250.
-    OT_REJECT(chk(f, kBuy, 1000, 100), Reject::gross_position);
+    // A buy cuts the buy leg to 50 but not the sell leg: the worst case stays 250, not worse.
+    OT_REJECT(chk(f, kBuy, 1000, 100), Reject::none);
+    // A sell would take it to 251.
+    OT_REJECT(f.check(kA, kSell, 1000, 1, 0, 0), Reject::gross_position);
     f.on_order_closed(kA, kSell, 100);
     OT_REJECT(chk(f, kBuy, 1000, 100), Reject::none);
 }
@@ -1323,6 +1329,184 @@ OT_TEST(random_fills_with_rounding_match_reference_and_dropped_remainders) {
     }
     OT_CHECK(inexact > 2'000);  // truncation happens all the time here
     OT_CHECK(flips > 200);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Regressions found by review: split check/commit, amends, exact open-order count, ring cap
+// ---------------------------------------------------------------------------------------------
+
+// A verdict alone never spends rate budget; admit() does, once per call. This is what lets a
+// caller that can still fail after the verdict (a gateway refusing the send) keep its budget.
+OT_TEST(evaluate_is_pure_and_admit_spends_the_budget) {
+    Limits l = wide();
+    l.max_orders_per_second = 2;
+    RiskEngine e(l, 4);
+    for (int k = 0; k < 10; ++k) {
+        OT_REJECT(e.evaluate(kA, kBuy, 100, 1, 0, 5), Reject::none);
+    }
+    e.admit(5);
+    OT_REJECT(e.evaluate(kA, kBuy, 100, 1, 0, 5), Reject::none);
+    e.admit(6);
+    OT_REJECT(e.evaluate(kA, kBuy, 100, 1, 0, 7), Reject::rate_limit);
+    OT_REJECT(e.evaluate(kA, kBuy, 100, 1, 0, 5 + kSec), Reject::none);  // first admission expired
+    // check() is evaluate + admit: it admits exactly when the verdict is none.
+    RiskEngine f(l, 4);
+    OT_REJECT(f.check(kA, kBuy, 100, 1, 0, 0), Reject::none);
+    OT_REJECT(f.check(kA, kBuy, 100, 1, 0, 0), Reject::none);
+    OT_REJECT(f.check(kA, kBuy, 100, 1, 0, 0), Reject::rate_limit);
+    OT_REJECT(f.check(kA, kBuy, 100, 0, 0, 0), Reject::invalid_order);  // a refusal spends nothing
+    OT_REJECT(f.check(kA, kBuy, 100, 1, 0, kSec), Reject::none);
+}
+
+// An amend is judged on the new open quantity at the new price for size, notional and band, and
+// on the extra exposure only for the position limits.
+OT_TEST(evaluate_replace_judges_the_new_total_and_the_added_exposure) {
+    Limits l = wide();
+    l.max_order_qty = 1000;
+    l.max_order_notional = 1000 * 100;
+    l.max_position = 1500;
+    l.price_band_bps = 100;
+    RiskEngine e(l, 4);
+    e.on_order_open(kA, kBuy, 1000);  // the order being amended
+    const Price ref = 100;
+    // Adds nothing, yet the new open quantity is over the size cap.
+    OT_REJECT(e.evaluate_replace(kA, kBuy, 100, 1001, 0, ref, 0), Reject::order_qty);
+    // Adds 500 (fits the position limit 1000 + 500) but the new total is over the size cap.
+    OT_REJECT(e.evaluate_replace(kA, kBuy, 100, 1500, 500, ref, 0), Reject::order_qty);
+    // Price and notional are those of the new open quantity at the new price.
+    OT_REJECT(e.evaluate_replace(kA, kBuy, 101, 1000, 0, ref, 0), Reject::order_notional);
+    OT_REJECT(e.evaluate_replace(kA, kBuy, 100, 1000, 0, ref, 0), Reject::none);
+    // Band: 2 % off the reference is out even for a shrink.
+    Limits b = wide();
+    b.price_band_bps = 100;
+    RiskEngine f(b, 4);
+    f.on_order_open(kA, kBuy, 100);
+    OT_REJECT(f.evaluate_replace(kA, kBuy, 102, 50, 0, 100, 0), Reject::price_band);
+    OT_REJECT(f.evaluate_replace(kA, kBuy, 101, 50, 0, 100, 0), Reject::none);
+    // Position sees only the extra exposure: 1000 open + 500 = 1500 fits, + 501 does not.
+    Limits p = wide();
+    p.max_position = 1500;
+    RiskEngine g(p, 4);
+    g.on_order_open(kA, kBuy, 1000);
+    OT_REJECT(g.evaluate_replace(kA, kBuy, 100, 1500, 500, 0, 0), Reject::none);
+    OT_REJECT(g.evaluate_replace(kA, kBuy, 100, 1501, 501, 0, 0), Reject::position);
+    // Bad input.
+    OT_REJECT(g.evaluate_replace(kA, kBuy, 0, 10, 0, 0, 0), Reject::invalid_order);
+    OT_REJECT(g.evaluate_replace(kA, kBuy, 100, 0, 0, 0, 0), Reject::invalid_order);
+    OT_REJECT(g.evaluate_replace(99, kBuy, 100, 10, 0, 0, 0), Reject::invalid_order);
+}
+
+OT_TEST(an_amend_that_adds_nothing_ignores_kill_switch_rate_and_open_order_limits) {
+    Limits l = wide();
+    l.max_orders_per_second = 1;
+    l.max_open_orders = 1;
+    RiskEngine e(l, 4);
+    OT_REJECT(e.check(kA, kBuy, 100, 10, 0, 0), Reject::none);  // spends the only admission
+    e.on_order_open(kA, kBuy, 10);                              // and fills max_open_orders
+    e.set_kill_switch(true);
+    OT_REJECT(e.evaluate_replace(kA, kBuy, 100, 5, 0, 0, 1), Reject::none);
+    OT_REJECT(e.evaluate_replace(kA, kBuy, 100, 11, 1, 0, 1), Reject::kill_switch);
+    e.set_kill_switch(false);
+    OT_REJECT(e.evaluate_replace(kA, kBuy, 100, 5, 0, 0, 1), Reject::none);
+    OT_REJECT(e.evaluate_replace(kA, kBuy, 100, 11, 1, 0, 1), Reject::rate_limit);
+    // No amend is ever an additional order.
+    OT_REJECT(e.evaluate_replace(kA, kBuy, 100, 11, 1, 0, kSec), Reject::none);
+    OT_REJECT(e.evaluate(kA, kBuy, 100, 1, 0, kSec), Reject::open_orders);
+}
+
+// The count of working orders is kept exactly by the explicit calls: quantity moves on an open
+// order never touch it, and only on_order_end takes one off.
+OT_TEST(open_order_count_is_exact_with_the_explicit_calls) {
+    RiskEngine e(wide(), 4);
+    e.on_order_open(kA, kBuy, 100);
+    e.on_order_open(kA, kBuy, 100);
+    e.on_order_open(kA, kBuy, 100);
+    OT_CHECK_EQ(e.open_orders(), 3u);
+    OT_CHECK_EQ(e.open_qty(kA, kBuy), std::int64_t{300});
+
+    e.on_order_grow(kA, kBuy, 50);     // an amend that adds size: still the same orders
+    e.on_order_reduce(kA, kBuy, 250);  // fills and cancels
+    OT_CHECK_EQ(e.open_orders(), 3u);
+    OT_CHECK_EQ(e.open_qty(kA, kBuy), std::int64_t{100});
+    e.on_order_reduce(kA, kBuy, 1'000'000);  // clamped, never negative
+    OT_CHECK_EQ(e.open_qty(kA, kBuy), std::int64_t{0});
+    OT_CHECK_EQ(e.open_orders(), 3u);  // three orders are still there, even with no quantity booked
+
+    e.on_order_grow(kA, kBuy, 10);
+    e.on_order_end(kA, kBuy, 4);
+    OT_CHECK_EQ(e.open_orders(), 2u);
+    OT_CHECK_EQ(e.open_qty(kA, kBuy), std::int64_t{6});
+    e.on_order_end(kA, kBuy, 0);
+    e.on_order_end(kA, kBuy, 6);
+    OT_CHECK_EQ(e.open_orders(), 0u);
+    OT_CHECK_EQ(e.open_qty(kA, kBuy), std::int64_t{0});
+    e.on_order_end(kA, kBuy, 5);  // an unmatched end is harmless
+    OT_CHECK_EQ(e.open_orders(), 0u);
+    OT_CHECK_EQ(e.open_qty(kA, kBuy), std::int64_t{0});
+
+    // Sides and instruments are separate; bad input is ignored.
+    e.on_order_open(kA, kSell, 10);
+    e.on_order_open(kB, kBuy, 10);
+    e.on_order_grow(99, kBuy, 10);
+    e.on_order_reduce(99, kBuy, 10);
+    e.on_order_end(99, kBuy, 10);
+    e.on_order_open(kA, kBuy, 0);
+    OT_CHECK_EQ(e.open_orders(), 2u);
+    e.on_order_end(kA, kSell, 10);
+    OT_CHECK_EQ(e.open_orders(), 1u);
+    OT_CHECK_EQ(e.open_qty(kB, kBuy), std::int64_t{10});
+}
+
+// The quantity-only release cannot tell orders apart, so it cannot keep the count: a far order
+// resting while another is opened and cancelled keeps the estimate above the truth. The
+// explicit calls do not have this problem (see above); this pins down why the order manager
+// uses them.
+OT_TEST(the_estimating_release_overcounts_where_the_explicit_calls_do_not) {
+    RiskEngine est(wide(), 4);
+    RiskEngine exact(wide(), 4);
+    est.on_order_open(kA, kBuy, 100);
+    exact.on_order_open(kA, kBuy, 100);
+    for (int k = 0; k < 5; ++k) {
+        est.on_order_open(kA, kBuy, 100);
+        exact.on_order_open(kA, kBuy, 100);
+        est.on_order_closed(kA, kBuy, 100);
+        exact.on_order_end(kA, kBuy, 100);
+    }
+    OT_CHECK_EQ(exact.open_orders(), 1u);
+    OT_CHECK(est.open_orders() > 1u);
+    OT_CHECK_EQ(est.open_qty(kA, kBuy), exact.open_qty(kA, kBuy));
+}
+
+// A limit that would need an absurd ring is not honoured by allocating it.
+OT_TEST(rate_ring_size_is_capped) {
+    Limits l = wide();
+    l.max_orders_per_second = 0xFFFFFFFFu;  // used to ask for 32 GiB
+    RiskEngine e(l, 4);
+    for (int k = 0; k < 100; ++k) OT_REJECT(e.check(kA, kBuy, 100, 1, 0, 0), Reject::none);
+    l.max_orders_per_second = static_cast<std::uint32_t>(RiskEngine::kMaxRateRing) + 1;
+    RiskEngine f(l, 4);  // above the cap: disabled, so a window's worth of admissions never fills
+    for (std::size_t k = 0; k < RiskEngine::kMaxRateRing + 10; ++k) {
+        if (f.check(kA, kBuy, 100, 1, 0, 0) != Reject::none) {
+            OT_CHECK(false);
+            break;
+        }
+    }
+    l.max_orders_per_second = 3;  // ordinary limits still bite
+    RiskEngine g(l, 4);
+    for (int k = 0; k < 3; ++k) OT_REJECT(g.check(kA, kBuy, 100, 1, 0, 0), Reject::none);
+    OT_REJECT(g.check(kA, kBuy, 100, 1, 0, 0), Reject::rate_limit);
+}
+
+// Gross exposure: an order that does not add to it is not refused for being over the cap.
+OT_TEST(gross_cap_refuses_only_orders_that_add_exposure) {
+    Limits l = wide();
+    l.max_gross_position = 200;
+    RiskEngine e(l, 4);
+    e.on_fill(kA, kBuy, 150, 100);
+    e.on_fill(kB, kBuy, 150, 100);  // gross 300, over the cap
+    OT_REJECT(e.evaluate(kA, kSell, 100, 50, 0, 0), Reject::none);   // A: 150 -> 100, gross 250
+    OT_REJECT(e.evaluate(kA, kBuy, 100, 1, 0, 0), Reject::gross_position);
+    OT_REJECT(e.evaluate(kC, kBuy, 100, 1, 0, 0), Reject::gross_position);  // new instrument adds
 }
 
 #if defined(__clang__)

@@ -55,8 +55,9 @@ void usage(std::FILE* out) {
         "                   and to reports coming back (default 50)\n"
         "  --book-orders N  live-order capacity of the order books for --capture/--itch\n"
         "                   (default 2097152)\n"
-        "  --session-orders N  orders the strategy may send in one run (default 262144); a run\n"
-        "                   that reaches it may have refused later orders, which is flagged\n"
+        "  --session-orders N  order-table slots: orders that may be working at the same moment\n"
+        "                   (default 262144). Finished orders give their slot back, so this is\n"
+        "                   not a limit on the run; a full table is reported as capacity rejects\n"
         "  --json           print one JSON object instead of the table (PnL in units of 1e-4)\n"
         "  --help           show this text\n",
         out);
@@ -154,10 +155,12 @@ void print_json(const replay::BacktestReport& r, const char* strategy, const Opt
         "{\"strategy\":\"%s\",\"latency_us\":%llu,\"messages\":%llu,\"book_updates\":%llu,"
         "\"orders_sent\":%llu,\"orders_rejected_risk\":%llu,\"fills\":%llu,\"volume\":%llu,"
         "\"realized_pnl\":%lld,\"unrealized_pnl\":%lld,\"total_pnl\":%lld,\"max_drawdown\":%lld,"
-        "\"pnl_unit\":\"1e-4\",\"dropped_reports\":%llu,\"digest\":\"%016llx\"}\n",
+        "\"pnl_unit\":\"1e-4\",\"dropped_reports\":%llu,\"capacity_rejects\":%llu,"
+        "\"book_errors\":%llu,\"itch_skipped\":%llu,\"digest\":\"%016llx\"}\n",
         strategy, u(o.latency_us), u(r.messages), u(r.book_updates), u(r.orders_sent),
         u(r.orders_rejected_risk), u(r.fills), u(r.volume), i(r.realized_pnl), i(r.unrealized_pnl),
-        i(r.total_pnl), i(r.max_drawdown), u(r.dropped_reports), u(r.digest));
+        i(r.total_pnl), i(r.max_drawdown), u(r.dropped_reports), u(r.capacity_rejects), u(r.book_errors),
+        u(r.itch_skipped), u(r.digest));
 }
 
 // Runs one strategy over one source and prints the outcome. Returns the process exit code.
@@ -173,15 +176,28 @@ int run(Source& src, const Options& o, const char* title) {
     } else {
         replay::print_report(r, title, stdout);
     }
-    if (r.orders_sent >= o.session_orders) {
+    // Undersized tables degrade a run without failing it; say so on stderr, where --json
+    // output on stdout stays clean.
+    const auto u = [](std::uint64_t v) { return static_cast<unsigned long long>(v); };
+    if (r.capacity_rejects != 0) {
         std::fprintf(stderr,
-                     "ot_backtest: warning: the strategy reached the session order limit (%llu); later orders may have "
-                     "been refused (raise --session-orders)\n",
-                     static_cast<unsigned long long>(o.session_orders));
+                     "ot_backtest: warning: %llu strategy requests were refused because the order table or the "
+                     "simulator was full; the strategy did not get to trade freely (raise --session-orders)\n",
+                     u(r.capacity_rejects));
+    }
+    if (r.book_errors != 0) {
+        std::fprintf(stderr,
+                     "ot_backtest: warning: the order books refused %llu messages; they are probably too small for "
+                     "this feed (raise --book-orders); results are unreliable\n",
+                     u(r.book_errors));
+    }
+    if (r.itch_skipped != 0) {
+        std::fprintf(stderr, "ot_backtest: warning: %llu ITCH messages could not be decoded and were skipped\n",
+                     u(r.itch_skipped));
     }
     if (r.dropped_reports != 0) {
         std::fprintf(stderr, "ot_backtest: warning: %llu simulator reports were dropped; results are unreliable\n",
-                     static_cast<unsigned long long>(r.dropped_reports));
+                     u(r.dropped_reports));
     }
     return 0;
 }
