@@ -1,23 +1,20 @@
-# CMake / Ninja build output
+# Build output
 build/
 build-*/
 cmake-build-*/
 
-# Diagnostics produced during local experiments
-diagnostics/
-
-# Compiler-generated files
-*.o
-*.a
-*.so
-*.d
-*.out
-
-# Editor files
+# Editors / OS
 .vscode/
 .idea/
 *.swp
-
-# OS files
 .DS_Store
-optitrade_hello.sh
+
+# Generated data
+*.otcap
+*.itch
+
+# Fuzzer output
+crash-*
+leak-*
+timeout-*
+/corpus/

@@ -1,0 +1,41 @@
+ot_bench: tick-to-decision latency (Engine::on_itch)
+  cpu        Apple M1
+  os         Darwin 25.6.0 arm64
+  compiler   Apple LLVM 21.0.0 (clang-2100.1.1.101)
+  build      optimized, NDEBUG, neon (flags visible to the compiler only; the build system's -O level is not recorded)
+  timer      std::chrono::steady_clock
+  timer read floor  min 0.0, p50 0.0, p99 42.0, max 583.0 ns per empty timed region; smallest step 41.0 ns
+  NOTE       timer step is 41.0 ns: every per-call sample is a multiple of it. Means are unbiased,
+             but percentiles below a few steps only tell you which step the call landed in.
+  pinned     no (scheduler decides)
+  feed       seed 1, 8 symbols, 2100201 messages total (preamble 201, warmup 100000, measured 2000000), 64135522 bytes
+  feed mix   (measured region) A=717279 C=42110 D=452177 E=310835 F=79224 P=61848 S=8033 U=163809 X=164685
+  gateway    accepts and discards; exchange replies ON (answered after each timed call, outside the timed region)
+  mode       closed loop
+
+== strategy imbalance_taker ==
+  throughput pass: 2000000 messages in 163.241 ms -> 81.6 ns/msg, 12.252 M msgs/s
+  measured region: 2000000 messages, all series in nanoseconds (timer read floor included)
+  series (ns)                     n      mean       p50       p90       p99     p99.9     p99.99         max
+  closed-loop service       2000000      73.5      83.0     125.0     250.0     333.0      458.0     51416.0
+  orders in measured region: orders sent 26967 (enter 26967, cancel 0, replace 0), risk rejects 0, fills 26967,
+                             book updates 1930119, book errors 0, exchange replies 53934
+  counters identical across all passes: yes
+
+== strategy microprice_maker ==
+  throughput pass: 2000000 messages in 155.957 ms -> 78.0 ns/msg, 12.824 M msgs/s
+  measured region: 2000000 messages, all series in nanoseconds (timer read floor included)
+  series (ns)                     n      mean       p50       p90       p99     p99.9     p99.99         max
+  closed-loop service       2000000      67.5      42.0      84.0     333.0     458.0      542.0     28083.0
+  orders in measured region: orders sent 436 (enter 436, cancel 436, replace 50658), risk rejects 0, fills 0,
+                             book updates 1930119, book errors 0, exchange replies 51530
+  counters identical across all passes: yes
+
+== strategy ema_cross ==
+  throughput pass: 2000000 messages in 140.200 ms -> 70.1 ns/msg, 14.265 M msgs/s
+  measured region: 2000000 messages, all series in nanoseconds (timer read floor included)
+  series (ns)                     n      mean       p50       p90       p99     p99.9     p99.99         max
+  closed-loop service       2000000      60.8      42.0      84.0     208.0     292.0      375.0     29834.0
+  orders in measured region: orders sent 26871 (enter 26871, cancel 0, replace 0), risk rejects 0, fills 26871,
+                             book updates 1930119, book errors 0, exchange replies 53742
+  counters identical across all passes: yes
