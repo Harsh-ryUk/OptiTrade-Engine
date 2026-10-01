@@ -43,6 +43,7 @@ ctest --preset release
 | `ot_bench` | tick-to-decision latency, with coordinated-omission-aware open-loop mode |
 | `ot_udp_demo` | three-thread MoldUDP64 pipeline with loss injection and gap handling |
 | `ot_itch_inspect` | statistics and book state for a Nasdaq ITCH file |
+| `ot_book_dump` | print an order-book ladder as CSV (`tools/plot_book.py` draws it) |
 
 Presets: `dev`, `release`, `asan` (ASan + UBSan), `tsan`, `fuzz` (libFuzzer, clang).
 
@@ -81,6 +82,8 @@ All numbers below come from runs of the code in this repository.
 This is the engine's own processing time for one message, not wire-to-wire latency, and it has not been
 measured on x86 or an isolated core.
 
+![Latency](docs/img/latency.png)
+
 **Backtests** on the synthetic market (seed 42, 8 symbols, 200 000 messages, 50 µs latency each way). They
 show that the tooling works end to end; the market is synthetic and these are not claims about real
 profitability:
@@ -90,6 +93,23 @@ profitability:
 | Imbalance taker | 2 736 | 2 648 | 251 662 | -957.98 | `71b2bc32e2aaea05` |
 | Microprice maker | 850 | 888 | 81 939 | 378.13 | `003844521f903d75` |
 | EMA crossover | 2 897 | 2 832 | 276 919 | -2 654.86 | `8ae3940c57b17a0d` |
+
+## See it run
+
+A backtest, replaying 200 000 synthetic market messages through the engine and simulator. The digest is a
+fingerprint of every order and every exchange reply and is identical on every platform:
+
+![Backtest output](docs/img/demo_backtest.png)
+
+Streaming the feed over UDP while dropping every 7th packet. The engine counts exactly what was lost,
+cancels its orders and halts trading rather than trade on a broken book (the book errors are the direct
+consequence of the missing messages):
+
+![UDP loss demo](docs/img/demo_udp_loss.png)
+
+The order book the engine maintains for one instrument (synthetic market):
+
+![Order book depth](docs/img/book_depth.png)
 
 ## Verification
 
@@ -112,6 +132,7 @@ has a regression test. Details and the list of what is **not** covered are in
 ```
 include/optitrade/   the engine (header-only)
 apps/                command line tools and benchmarks (ot_*.cpp)
+tools/               plotting scripts for the charts above
 tests/               unit, differential, model-based, property and concurrency tests
 fuzz/                libFuzzer targets
 docs/                design, protocols, testing, benchmarking
