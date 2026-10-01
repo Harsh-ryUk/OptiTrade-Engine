@@ -428,10 +428,14 @@ OT_TEST(multicast_join_and_round_trip_on_loopback) {
     OT_CHECK_EQ(n, std::ptrdiff_t{37});
     OT_CHECK(n == 37 && std::memcmp(buf.data(), msg.data(), 37) == 0);
 
-    // With host-local delivery switched off the sender's own datagram must not come back.
+    // Whether a datagram still loops back with the option off depends on the OS and on
+    // routing through the loopback interface (Linux delivers it anyway), so only the
+    // setter's effect on the socket is asserted elsewhere. Here the option must simply
+    // not break sending, and delivery must work again once it is switched back on.
     OT_CHECK(tx.set_multicast_loop(false));
     OT_CHECK(tx.send_to(group, rx.local_port(), view(msg)));
-    OT_CHECK_EQ(rx.recv(std::span<std::byte>(buf), 200'000), std::ptrdiff_t{0});
+    while (rx.recv(std::span<std::byte>(buf), 100'000) > 0) {
+    }
     OT_CHECK(tx.set_multicast_loop(true));
     OT_CHECK(tx.send_to(group, rx.local_port(), view(msg)));
     OT_CHECK_EQ(rx.recv(std::span<std::byte>(buf), kWaitUs), std::ptrdiff_t{37});
