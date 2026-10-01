@@ -1,0 +1,7 @@
+strategy,pass,metric,count,mean_ns,p50_ns,p90_ns,p99_ns,p999_ns,p9999_ns,max_ns,msgs_per_s
+imbalance_taker,closed,service,2000000,73.454,83.000,125.000,250.000,333.000,458.000,51416.000,
+imbalance_taker,throughput,ns_per_msg,2000000,81.620,,,,,,,12251830.2
+microprice_maker,closed,service,2000000,67.488,42.000,84.000,333.000,458.000,542.000,28083.000,
+microprice_maker,throughput,ns_per_msg,2000000,77.978,,,,,,,12824068.2
+ema_cross,closed,service,2000000,60.823,42.000,84.000,208.000,292.000,375.000,29834.000,
+ema_cross,throughput,ns_per_msg,2000000,70.100,,,,,,,14265322.5
